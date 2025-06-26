@@ -1,0 +1,480 @@
+# Algorithm 2: Multi-View Feature Learning (MVFL) Architecture
+# Implementation for AMTE-IDS
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import pandas as pd
+import math
+
+class MultiHeadAttention(nn.Module):
+    """Multi-head self-attention mechanism"""
+    
+    def __init__(self, d_model, num_heads, dropout=0.1):
+        super(MultiHeadAttention, self).__init__()
+        assert d_model % num_heads == 0
+        
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        
+        self.W_q = nn.Linear(d_model, d_model)
+        self.W_k = nn.Linear(d_model, d_model)
+        self.W_v = nn.Linear(d_model, d_model)
+        self.W_o = nn.Linear(d_model, d_model)
+        
+        self.dropout = nn.Dropout(dropout)
+        
+    def scaled_dot_product_attention(self, Q, K, V, mask=None):
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e9)
+        
+        attention_weights = F.softmax(scores, dim=-1)
+        attention_weights = self.dropout(attention_weights)
+        
+        output = torch.matmul(attention_weights, V)
+        return output, attention_weights
+    
+    def forward(self, query, key, value, mask=None):
+        batch_size = query.size(0)
+        
+        # Linear transformations and split into heads
+        Q = self.W_q(query).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        K = self.W_k(key).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        V = self.W_v(value).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        
+        # Apply attention
+        attn_output, attn_weights = self.scaled_dot_product_attention(Q, K, V, mask)
+        
+        # Concatenate heads
+        attn_output = attn_output.transpose(1, 2).contiguous().view(
+            batch_size, -1, self.d_model)
+        
+        output = self.W_o(attn_output)
+        return output
+
+class TransformerEncoder(nn.Module):
+    """Transformer encoder block"""
+    
+    def __init__(self, d_model, num_heads, d_ff, dropout=0.1):
+        super(TransformerEncoder, self).__init__()
+        self.attention = MultiHeadAttention(d_model, num_heads, dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        
+        self.feed_forward = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_ff, d_model)
+        )
+        
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x, mask=None):
+        # Multi-head attention with residual connection
+        attn_output = self.attention(x, x, x, mask)
+        x = self.norm1(x + self.dropout(attn_output))
+        
+        # Feed forward with residual connection
+        ff_output = self.feed_forward(x)
+        x = self.norm2(x + self.dropout(ff_output))
+        
+        return x
+
+class GlobalFeatureView(nn.Module):
+    """Global feature view using standard transformer encoder"""
+    
+    def __init__(self, input_dim, d_model=256, num_heads=6, num_layers=3, dropout=0.1):
+        super(GlobalFeatureView, self).__init__()
+        self.d_model = d_model
+        
+        # Feature embedding
+        self.embedding = nn.Linear(input_dim, d_model)
+        
+        # Positional encoding
+        self.pos_encoding = self._get_positional_encoding(d_model, max_len=1000)
+        
+        # Transformer layers
+        self.transformer_layers = nn.ModuleList([
+            TransformerEncoder(d_model, num_heads, d_model*4, dropout)
+            for _ in range(num_layers)
+        ])
+        
+        # Output projection
+        self.output_projection = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+        
+    def _get_positional_encoding(self, d_model, max_len=1000):
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * 
+                           (-math.log(10000.0) / d_model))
+        
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        
+        return pe.unsqueeze(0)
+        
+    def forward(self, x):
+        # x shape: (batch_size, input_dim)
+        batch_size = x.size(0)
+        
+        # Embedding
+        x = self.embedding(x).unsqueeze(1)  # (batch_size, 1, d_model)
+        
+        # Add positional encoding
+        pos_enc = self.pos_encoding[:, :x.size(1), :].to(x.device)
+        x = x + pos_enc
+        x = self.dropout(x)
+        
+        # Pass through transformer layers
+        for layer in self.transformer_layers:
+            x = layer(x)
+        
+        # Global pooling and projection
+        x = x.mean(dim=1)  # (batch_size, d_model)
+        x = self.output_projection(x)
+        
+        return x
+
+class TemporalPatternView(nn.Module):
+    """Temporal pattern view with causal masking"""
+    
+    def __init__(self, input_dim, d_model=256, num_heads=8, num_layers=3, 
+                 window_size=10, dropout=0.1):
+        super(TemporalPatternView, self).__init__()
+        self.d_model = d_model
+        self.window_size = window_size
+        
+        # Temporal embedding
+        self.embedding = nn.Linear(input_dim, d_model)
+        
+        # Transformer layers with causal masking
+        self.transformer_layers = nn.ModuleList([
+            TransformerEncoder(d_model, num_heads, d_model*4, dropout)
+            for _ in range(num_layers)
+        ])
+        
+        # Output projection
+        self.output_projection = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+        
+    def create_causal_mask(self, seq_len):
+        """Create causal mask for temporal dependencies"""
+        mask = torch.tril(torch.ones(seq_len, seq_len))
+        return mask.unsqueeze(0).unsqueeze(0)  # (1, 1, seq_len, seq_len)
+        
+    def forward(self, x):
+        # x shape: (batch_size, input_dim)
+        batch_size = x.size(0)
+        
+        # Create temporal windows by repeating features
+        # In real implementation, this would be actual temporal sequences
+        x_temporal = x.unsqueeze(1).repeat(1, self.window_size, 1)  # (batch_size, window_size, input_dim)
+        
+        # Add some temporal variation (simplified)
+        temporal_noise = torch.randn_like(x_temporal) * 0.1
+        x_temporal = x_temporal + temporal_noise
+        
+        # Embedding
+        x_embedded = self.embedding(x_temporal)  # (batch_size, window_size, d_model)
+        x_embedded = self.dropout(x_embedded)
+        
+        # Create causal mask
+        seq_len = x_embedded.size(1)
+        causal_mask = self.create_causal_mask(seq_len).to(x.device)
+        
+        # Pass through transformer layers with causal masking
+        for layer in self.transformer_layers:
+            x_embedded = layer(x_embedded, causal_mask)
+        
+        # Take the last time step and project
+        x_output = x_embedded[:, -1, :]  # (batch_size, d_model)
+        x_output = self.output_projection(x_output)
+        
+        return x_output
+
+class ProtocolSpecificView(nn.Module):
+    """Protocol-specific view for domain knowledge integration"""
+    
+    def __init__(self, input_dim, d_model=128, num_heads=4, num_layers=2, dropout=0.1):
+        super(ProtocolSpecificView, self).__init__()
+        self.d_model = d_model
+        
+        # Protocol-specific feature extraction
+        self.protocol_features = nn.Sequential(
+            nn.Linear(input_dim, d_model),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Protocol embedding
+        self.protocol_embedding = nn.Linear(d_model, d_model)
+        
+        # Transformer layers
+        self.transformer_layers = nn.ModuleList([
+            TransformerEncoder(d_model, num_heads, d_model*4, dropout)
+            for _ in range(num_layers)
+        ])
+        
+        # Output projection
+        self.output_projection = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+        
+    def extract_protocol_features(self, x):
+        """Extract protocol-specific features"""
+        # In real implementation, this would use domain knowledge
+        # For now, we use a learned transformation
+        return self.protocol_features(x)
+        
+    def forward(self, x):
+        # x shape: (batch_size, input_dim)
+        
+        # Extract protocol-specific features
+        protocol_features = self.extract_protocol_features(x)
+        
+        # Embedding
+        x_embedded = self.protocol_embedding(protocol_features).unsqueeze(1)  # (batch_size, 1, d_model)
+        x_embedded = self.dropout(x_embedded)
+        
+        # Pass through transformer layers
+        for layer in self.transformer_layers:
+            x_embedded = layer(x_embedded)
+        
+        # Global pooling and projection
+        x_output = x_embedded.squeeze(1)  # (batch_size, d_model)
+        x_output = self.output_projection(x_output)
+        
+        return x_output
+
+class CrossViewAttentionFusion(nn.Module):
+    """Cross-view attention fusion mechanism"""
+    
+    def __init__(self, view_dims):
+        super(CrossViewAttentionFusion, self).__init__()
+        self.view_dims = view_dims
+        total_dim = sum(view_dims)
+        
+        # Attention network for dynamic weighting
+        self.attention_network = nn.Sequential(
+            nn.Linear(total_dim, 512),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, len(view_dims)),
+            nn.Softmax(dim=1)
+        )
+        
+        # Final projection
+        self.final_projection = nn.Linear(total_dim, max(view_dims))
+        
+    def forward(self, view_features):
+        """Dynamically weight and fuse multi-view features"""
+        # view_features: list of tensors from different views
+        
+        # Concatenate all view features
+        concatenated = torch.cat(view_features, dim=1)  # (batch_size, total_dim)
+        
+        # Compute attention weights
+        attention_weights = self.attention_network(concatenated)  # (batch_size, num_views)
+        
+        # Apply attention weights to each view
+        weighted_features = []
+        start_idx = 0
+        for i, (view_feature, dim) in enumerate(zip(view_features, self.view_dims)):
+            weight = attention_weights[:, i:i+1]  # (batch_size, 1)
+            weighted_feature = weight * view_feature
+            weighted_features.append(weighted_feature)
+            start_idx += dim
+        
+        # Concatenate weighted features
+        fused_features = torch.cat(weighted_features, dim=1)
+        
+        # Final projection
+        output = self.final_projection(fused_features)
+        
+        return output, attention_weights
+
+class MVFLModule(nn.Module):
+    """
+    Multi-View Feature Learning Module
+    Integrates global, temporal, and protocol-specific views
+    """
+    
+    def __init__(self, input_dim, output_dim=256):
+        super(MVFLModule, self).__init__()
+        
+        # Three specialized views
+        self.global_view = GlobalFeatureView(input_dim, output_dim)
+        self.temporal_view = TemporalPatternView(input_dim, output_dim)
+        self.protocol_view = ProtocolSpecificView(input_dim, output_dim//2)
+        
+        # Cross-view attention fusion
+        view_dims = [output_dim, output_dim, output_dim//2]
+        self.fusion = CrossViewAttentionFusion(view_dims)
+        
+    def forward(self, x):
+        """Multi-view feature extraction and fusion (Algorithm 2)"""
+        # Extract features from each view
+        global_features = self.global_view(x)      # Global feature relationships
+        temporal_features = self.temporal_view(x)   # Temporal patterns
+        protocol_features = self.protocol_view(x)   # Protocol-specific characteristics
+        
+        # Fuse features using cross-view attention
+        view_features = [global_features, temporal_features, protocol_features]
+        fused_features, attention_weights = self.fusion(view_features)
+        
+        return fused_features, attention_weights, {
+            'global': global_features,
+            'temporal': temporal_features,
+            'protocol': protocol_features
+        }
+
+def load_balanced_data(csv_path):
+    """Load balanced dataset from CSV"""
+    df = pd.read_csv(csv_path)
+    
+    # Separate features and target
+    X = df.drop('attack_type', axis=1).values
+    y = df['attack_type'].values
+    
+    print(f"Loaded balanced data: {X.shape}")
+    return X, y
+
+def train_mvfl_module(csv_path, epochs=100, batch_size=64, learning_rate=0.001):
+    """Train the MVFL module on balanced data"""
+    
+    # Load data
+    X, y = load_balanced_data(csv_path)
+    
+    # Convert to tensors
+    X_tensor = torch.FloatTensor(X)
+    y_tensor = torch.LongTensor(y)
+    
+    # Create data loader
+    dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    
+    # Initialize MVFL module
+    input_dim = X.shape[1]
+    output_dim = 256
+    mvfl = MVFLModule(input_dim, output_dim)
+    
+    # Add classifier head for training
+    classifier = nn.Sequential(
+        nn.Linear(output_dim, 128),
+        nn.ReLU(),
+        nn.Dropout(0.2),
+        nn.Linear(128, len(np.unique(y)))
+    )
+    
+    # Optimizer and loss
+    optimizer = torch.optim.Adam(list(mvfl.parameters()) + list(classifier.parameters()), 
+                                lr=learning_rate)
+    criterion = nn.CrossEntropyLoss()
+    
+    # Training loop
+    mvfl.train()
+    classifier.train()
+    
+    for epoch in range(epochs):
+        total_loss = 0
+        correct = 0
+        total = 0
+        
+        for batch_x, batch_y in dataloader:
+            optimizer.zero_grad()
+            
+            # Extract multi-view features
+            fused_features, attention_weights, individual_features = mvfl(batch_x)
+            
+            # Classification
+            predictions = classifier(fused_features)
+            loss = criterion(predictions, batch_y)
+            
+            # Backward pass
+            loss.backward()
+            optimizer.step()
+            
+            # Statistics
+            total_loss += loss.item()
+            _, predicted = torch.max(predictions.data, 1)
+            total += batch_y.size(0)
+            correct += (predicted == batch_y).sum().item()
+        
+        accuracy = 100 * correct / total
+        avg_loss = total_loss / len(dataloader)
+        
+        if epoch % 20 == 0:
+            print(f'Epoch [{epoch}/{epochs}], Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%')
+    
+    print("\n=== MVFL Training Complete ===")
+    
+    # Analyze attention weights
+    mvfl.eval()
+    with torch.no_grad():
+        sample_batch = X_tensor[:100]  # First 100 samples
+        _, attention_weights, _ = mvfl(sample_batch)
+        
+        # Average attention weights across samples
+        avg_attention = attention_weights.mean(dim=0)
+        print(f"Average attention weights:")
+        print(f"  Global View: {avg_attention[0]:.3f}")
+        print(f"  Temporal View: {avg_attention[1]:.3f}")
+        print(f"  Protocol View: {avg_attention[2]:.3f}")
+    
+    return mvfl, classifier
+
+def extract_mvfl_features(mvfl_model, csv_path, save_path="/content/mvfl_features.csv"):
+    """Extract MVFL features from data and save"""
+    
+    # Load data
+    X, y = load_balanced_data(csv_path)
+    X_tensor = torch.FloatTensor(X)
+    
+    # Extract features
+    mvfl_model.eval()
+    with torch.no_grad():
+        fused_features, attention_weights, individual_features = mvfl_model(X_tensor)
+    
+    # Convert to numpy
+    fused_features_np = fused_features.numpy()
+    attention_weights_np = attention_weights.numpy()
+    
+    # Create DataFrame with MVFL features
+    feature_names = [f'mvfl_feature_{i}' for i in range(fused_features_np.shape[1])]
+    attention_names = ['global_attention', 'temporal_attention', 'protocol_attention']
+    
+    df_features = pd.DataFrame(fused_features_np, columns=feature_names)
+    df_attention = pd.DataFrame(attention_weights_np, columns=attention_names)
+    df_labels = pd.DataFrame(y, columns=['attack_type'])
+    
+    # Combine all
+    df_final = pd.concat([df_features, df_attention, df_labels], axis=1)
+    
+    # Save
+    df_final.to_csv(save_path, index=False)
+    print(f"MVFL features saved to: {save_path}")
+    
+    return df_final
+
+# Usage example
+if __name__ == "__main__":
+    # Train MVFL on balanced data
+    balanced_csv_path = "/content/balanced_dataset.csv"
+    
+    print("Training Multi-View Feature Learning Module...")
+    mvfl_model, classifier = train_mvfl_module(balanced_csv_path, epochs=100)
+    
+    print("\nExtracting MVFL features...")
+    mvfl_features = extract_mvfl_features(mvfl_model, balanced_csv_path)
+    
+    print("\n=== Algorithm 2 Complete ===")
+    print("MVFL features ready for dynamic ensemble detection!")
