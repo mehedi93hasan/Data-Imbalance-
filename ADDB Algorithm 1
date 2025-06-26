@@ -1,0 +1,545 @@
+# Algorithm 1: Enhanced WGAN-GP for Balanced Data Generation
+# Concise implementation with CSV data loading
+
+import torch
+import torch.nn as nn
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.model_selection import train_test_split
+from sklearn.metrics.pairwise import rbf_kernel
+
+def load_and_preprocess_csv(csv_path):
+    """Load and preprocess CSV data"""
+    # Load CSV
+    df = pd.read_csv(csv_path)
+    print(f"Loaded data: {df.shape}")
+    
+    # Auto-detect target column (assume last column or common names)
+    target_candidates = ['Label', 'label', 'attack_type', 'Attack', 'class', 'Class']
+    target_col = None
+    
+    for col in target_candidates:
+        if col in df.columns:
+            target_col = col
+            break
+    
+    if target_col is None:
+        target_col = df.columns[-1]  # Use last column
+    
+    print(f"Target column: {target_col}")
+    
+    # Separate features and target
+    X = df.drop(target_col, axis=1)
+    y = df[target_col]
+    
+    # Handle categorical features
+    categorical_cols = X.select_dtypes(include=['object']).columns
+    for col in categorical_cols:
+        X[col] = pd.Categorical(X[col]).codes
+    
+    # Handle missing values
+    X = X.fillna(X.median())
+    
+    # Encode labels
+    label_encoder = LabelEncoder()
+    y_encoded = label_encoder.fit_transform(y)
+    
+    # Normalize features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    print(f"Preprocessed data: {X_scaled.shape}")
+    print(f"Classes: {label_encoder.classes_}")
+    print(f"Class distribution: {np.bincount(y_encoded)}")
+    
+    return X_scaled, y_encoded, scaler, label_encoder
+
+class MultiModalWGANGP:
+    def __init__(self, input_dim, latent_dim=128):
+        self.input_dim = input_dim
+        self.latent_dim = latent_dim
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Generator
+        self.generator = nn.Sequential(
+            nn.Linear(latent_dim, 256), nn.LeakyReLU(0.2), nn.BatchNorm1d(256),
+            nn.Linear(256, 512), nn.LeakyReLU(0.2), nn.BatchNorm1d(512),
+            nn.Linear(512, input_dim), nn.Tanh()
+        ).to(self.device)
+        
+        # Three critics with different architectures
+        self.critics = nn.ModuleList([
+            self._build_critic([64, 32, 16, 1]),  # Standard
+            self._build_critic([128, 64, 32, 1]), # Deeper
+            self._build_critic([32, 64, 32, 1])   # Different pattern
+        ]).to(self.device)
+        
+        # Optimizers
+        self.gen_optimizer = torch.optim.Adam(self.generator.parameters(), lr=0.0001)
+        self.critic_optimizers = [torch.optim.Adam(critic.parameters(), lr=0.0001) 
+                                 for critic in self.critics]
+        
+    def _build_critic(self, layers):
+        modules = []
+        prev_dim = self.input_dim
+        for dim in layers[:-1]:
+            modules.extend([nn.Linear(prev_dim, dim), nn.LeakyReLU(0.2)])
+            prev_dim = dim
+        modules.append(nn.Linear(prev_dim, layers[-1]))
+        return nn.Sequential(*modules)
+    
+    def gradient_penalty(self, real_data, fake_data, critic_idx):
+        """Compute gradient penalty"""
+        batch_size = real_data.size(0)
+        alpha = torch.rand(batch_size, 1).to(self.device)
+        interpolated = alpha * real_data + (1 - alpha) * fake_data
+        interpolated.requires_grad_(True)
+        
+        disc_interpolated = self.critics[critic_idx](interpolated)
+        gradients = torch.autograd.grad(
+            outputs=disc_interpolated, inputs=interpolated,
+            grad_outputs=torch.ones_like(disc_interpolated),
+            create_graph=True, retain_graph=True
+        )[0]
+        
+        penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+        return penalty
+    
+    def train_step(self, real_data, n_critic=5, lambda_gp=10):
+        """Single training step following Algorithm 1"""
+        batch_size = real_data.size(0)
+        real_data = real_data.to(self.device)
+        
+        # Train critics
+        critic_losses = []
+        for i, (critic, optimizer) in enumerate(zip(self.critics, self.critic_optimizers)):
+            for _ in range(n_critic):
+                optimizer.zero_grad()
+                
+                # Generate fake data
+                noise = torch.randn(batch_size, self.latent_dim).to(self.device)
+                fake_data = self.generator(noise).detach()
+                
+                # Critic loss
+                real_score = critic(real_data).mean()
+                fake_score = critic(fake_data).mean()
+                gp = self.gradient_penalty(real_data, fake_data, i)
+                
+                critic_loss = fake_score - real_score + lambda_gp * gp
+                critic_loss.backward()
+                optimizer.step()
+            
+            critic_losses.append(critic_loss.item())
+        
+        # Update critic weights (inverse loss weighting)
+        weights = np.array([1/max(loss, 1e-8) for loss in critic_losses])
+        weights = weights / weights.sum()
+        
+        # Train generator
+        self.gen_optimizer.zero_grad()
+        noise = torch.randn(batch_size, self.latent_dim).to(self.device)
+        fake_data = self.generator(noise)
+        
+        # Weighted generator loss
+        gen_loss = 0
+        for i, (critic, weight) in enumerate(zip(self.critics, weights)):
+            gen_loss += weight * (-critic(fake_data).mean())
+        
+        gen_loss.backward()
+        self.gen_optimizer.step()
+        
+        return critic_losses, gen_loss.item()
+    
+    def generate_samples(self, n_samples):
+        """Generate synthetic samples"""
+        self.generator.eval()
+        with torch.no_grad():
+            noise = torch.randn(n_samples, self.latent_dim).to(self.device)
+            samples = self.generator(noise).cpu().numpy()
+        return samples
+
+class QualityController:
+    def __init__(self, mmd_threshold=0.2, conf_threshold=0.8):
+        self.mmd_threshold = mmd_threshold
+        self.conf_threshold = conf_threshold
+    
+    def compute_mmd(self, X_real, X_fake, gamma=1.0):
+        """Compute MMD using RBF kernel"""
+        K_XX = rbf_kernel(X_real, gamma=gamma)
+        K_YY = rbf_kernel(X_fake, gamma=gamma)
+        K_XY = rbf_kernel(X_real, X_fake, gamma=gamma)
+        
+        mmd = K_XX.mean() + K_YY.mean() - 2 * K_XY.mean()
+        return mmd
+    
+    def filter_samples(self, X_real, X_fake, classifier=None):
+        """Three-stage quality control"""
+        # Stage 1: MMD filtering
+        mmd_score = self.compute_mmd(X_real, X_fake)
+        if mmd_score > self.mmd_threshold:
+            print(f"Warning: High MMD score {mmd_score:.3f}")
+        
+        # Stage 2: Correlation preservation (simplified)
+        real_corr = np.corrcoef(X_real.T)
+        fake_corr = np.corrcoef(X_fake.T)
+        corr_diff = np.linalg.norm(real_corr - fake_corr, 'fro')
+        
+        # Stage 3: Confidence filtering (if classifier provided)
+        if classifier is not None:
+            confidences = classifier.predict_proba(X_fake).max(axis=1)
+            high_conf_mask = confidences > self.conf_threshold
+            X_fake = X_fake[high_conf_mask]
+            print(f"Kept {high_conf_mask.sum()}/{len(high_conf_mask)} samples after confidence filtering")
+        
+        return X_fake, {'mmd': mmd_score, 'corr_diff': corr_diff}
+
+def balance_dataset_from_csv(csv_path, target_ratio=0.3, epochs=1000, save_output=True):
+    """Main function implementing Algorithm 1 with CSV input"""
+    from collections import Counter
+    
+    # Load and preprocess data
+    X, y, scaler, label_encoder = load_and_preprocess_csv(csv_path)
+    
+    # Split data
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, 
+                                                        stratify=y, random_state=42)
+    
+    # Analyze class distribution
+    class_counts = Counter(y_train)
+    majority_class = max(class_counts, key=class_counts.get)
+    minority_classes = [cls for cls, count in class_counts.items() 
+                       if count < class_counts[majority_class] * target_ratio]
+    
+    print(f"\nOriginal class distribution: {class_counts}")
+    print(f"Minority classes: {minority_classes}")
+    
+    X_balanced, y_balanced = X_train.copy(), y_train.copy()
+    
+    # Generate samples for each minority class
+    for minority_class in minority_classes:
+        print(f"\nBalancing class {minority_class} ({label_encoder.classes_[minority_class]})...")
+        
+        # Get minority class samples
+        minority_mask = y_train == minority_class
+        X_minority = X_train[minority_mask]
+        
+        if len(X_minority) < 10:  # Skip if too few samples
+            print(f"Skipping class {minority_class}: too few samples ({len(X_minority)})")
+            continue
+            
+        # Calculate target samples using logarithmic scaling
+        current_count = len(X_minority)
+        target_count = min(class_counts[majority_class], 
+                          int(current_count * np.log(class_counts[majority_class]/current_count + 1)))
+        n_generate = max(0, target_count - current_count)
+        
+        if n_generate == 0:
+            continue
+            
+        print(f"Generating {n_generate} samples for class {minority_class}")
+        
+        # Train MM-WGAN-GP
+        wgan = MultiModalWGANGP(X_minority.shape[1])
+        X_minority_tensor = torch.FloatTensor(X_minority)
+        
+        for epoch in range(epochs):
+            if len(X_minority) >= 32:  # Use full batch if enough samples
+                batch_indices = np.random.choice(len(X_minority), 32, replace=True)
+            else:
+                batch_indices = np.arange(len(X_minority))
+            
+            batch = X_minority_tensor[batch_indices]
+            critic_losses, gen_loss = wgan.train_step(batch)
+            
+            if epoch % 200 == 0:
+                print(f"Epoch {epoch}: Gen Loss {gen_loss:.4f}")
+        
+        # Generate and filter synthetic samples
+        X_synthetic = wgan.generate_samples(n_generate * 2)  # Generate extra for filtering
+        
+        # Quality control
+        quality_controller = QualityController()
+        X_synthetic_filtered, metrics = quality_controller.filter_samples(X_minority, X_synthetic)
+        
+        # Take only needed amount
+        if len(X_synthetic_filtered) > n_generate:
+            X_synthetic_filtered = X_synthetic_filtered[:n_generate]
+        
+        # Add to balanced dataset
+        X_balanced = np.vstack([X_balanced, X_synthetic_filtered])
+        y_balanced = np.hstack([y_balanced, np.full(len(X_synthetic_filtered), minority_class)])
+        
+        print(f"Added {len(X_synthetic_filtered)} synthetic samples")
+        print(f"Quality metrics: MMD={metrics['mmd']:.4f}, Corr_diff={metrics['corr_diff']:.4f}")
+    
+    print(f"\nFinal dataset size: {len(X_balanced)} (was {len(X_train)})")
+    print(f"Final class distribution: {Counter(y_balanced)}")
+    
+    # Save balanced dataset
+    if save_output:
+        # Create balanced dataframe
+        feature_names = [f'feature_{i}' for i in range(X_balanced.shape[1])]
+        df_balanced = pd.DataFrame(X_balanced, columns=feature_names)
+        df_balanced['attack_type'] = y_balanced
+        
+        # Save to CSV
+        output_path = "/content/balanced_dataset.csv"
+        df_balanced.to_csv(output_path, index=False)
+        print(f"Balanced dataset saved to: {output_path}")
+        
+        # Also save test set
+        df_test = pd.DataFrame(X_test, columns=feature_names)
+        df_test['attack_type'] = y_test
+        test_path = "/content/test_dataset.csv"
+        df_test.to_csv(test_path, index=False)
+        print(f"Test dataset saved to: {test_path}")
+    
+    return X_balanced, y_balanced, X_test, y_test, scaler, label_encoder
+
+# Usage example
+if __name__ == "__main__":
+    # Replace with your CSV file path
+    csv_path = "/content/your_dataset.csv"  # Upload your CSV first
+    
+    # Run Algorithm 1 with your data
+    X_balanced, y_balanced, X_test, y_test, scaler, label_encoder = balance_dataset_from_csv(
+        csv_path, target_ratio=0.3, epochs=500, save_output=True
+    )
+
+class MultiModalWGANGP:
+    def __init__(self, input_dim, latent_dim=128):
+        self.input_dim = input_dim
+        self.latent_dim = latent_dim
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Generator
+        self.generator = nn.Sequential(
+            nn.Linear(latent_dim, 256), nn.LeakyReLU(0.2), nn.BatchNorm1d(256),
+            nn.Linear(256, 512), nn.LeakyReLU(0.2), nn.BatchNorm1d(512),
+            nn.Linear(512, input_dim), nn.Tanh()
+        ).to(self.device)
+        
+        # Three critics with different architectures
+        self.critics = nn.ModuleList([
+            self._build_critic([64, 32, 16, 1]),  # Standard
+            self._build_critic([128, 64, 32, 1]), # Deeper
+            self._build_critic([32, 64, 32, 1])   # Different pattern
+        ]).to(self.device)
+        
+        # Optimizers
+        self.gen_optimizer = torch.optim.Adam(self.generator.parameters(), lr=0.0001)
+        self.critic_optimizers = [torch.optim.Adam(critic.parameters(), lr=0.0001) 
+                                 for critic in self.critics]
+        
+    def _build_critic(self, layers):
+        modules = []
+        prev_dim = self.input_dim
+        for dim in layers[:-1]:
+            modules.extend([nn.Linear(prev_dim, dim), nn.LeakyReLU(0.2)])
+            prev_dim = dim
+        modules.append(nn.Linear(prev_dim, layers[-1]))
+        return nn.Sequential(*modules)
+    
+    def gradient_penalty(self, real_data, fake_data, critic_idx):
+        """Compute gradient penalty"""
+        batch_size = real_data.size(0)
+        alpha = torch.rand(batch_size, 1).to(self.device)
+        interpolated = alpha * real_data + (1 - alpha) * fake_data
+        interpolated.requires_grad_(True)
+        
+        disc_interpolated = self.critics[critic_idx](interpolated)
+        gradients = torch.autograd.grad(
+            outputs=disc_interpolated, inputs=interpolated,
+            grad_outputs=torch.ones_like(disc_interpolated),
+            create_graph=True, retain_graph=True
+        )[0]
+        
+        penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+        return penalty
+    
+    def train_step(self, real_data, n_critic=5, lambda_gp=10):
+        """Single training step following Algorithm 1"""
+        batch_size = real_data.size(0)
+        real_data = real_data.to(self.device)
+        
+        # Train critics
+        critic_losses = []
+        for i, (critic, optimizer) in enumerate(zip(self.critics, self.critic_optimizers)):
+            for _ in range(n_critic):
+                optimizer.zero_grad()
+                
+                # Generate fake data
+                noise = torch.randn(batch_size, self.latent_dim).to(self.device)
+                fake_data = self.generator(noise).detach()
+                
+                # Critic loss
+                real_score = critic(real_data).mean()
+                fake_score = critic(fake_data).mean()
+                gp = self.gradient_penalty(real_data, fake_data, i)
+                
+                critic_loss = fake_score - real_score + lambda_gp * gp
+                critic_loss.backward()
+                optimizer.step()
+            
+            critic_losses.append(critic_loss.item())
+        
+        # Update critic weights (inverse loss weighting)
+        weights = np.array([1/max(loss, 1e-8) for loss in critic_losses])
+        weights = weights / weights.sum()
+        
+        # Train generator
+        self.gen_optimizer.zero_grad()
+        noise = torch.randn(batch_size, self.latent_dim).to(self.device)
+        fake_data = self.generator(noise)
+        
+        # Weighted generator loss
+        gen_loss = 0
+        for i, (critic, weight) in enumerate(zip(self.critics, weights)):
+            gen_loss += weight * (-critic(fake_data).mean())
+        
+        gen_loss.backward()
+        self.gen_optimizer.step()
+        
+        return critic_losses, gen_loss.item()
+    
+    def generate_samples(self, n_samples):
+        """Generate synthetic samples"""
+        self.generator.eval()
+        with torch.no_grad():
+            noise = torch.randn(n_samples, self.latent_dim).to(self.device)
+            samples = self.generator(noise).cpu().numpy()
+        return samples
+
+class QualityController:
+    def __init__(self, mmd_threshold=0.2, conf_threshold=0.8):
+        self.mmd_threshold = mmd_threshold
+        self.conf_threshold = conf_threshold
+    
+    def compute_mmd(self, X_real, X_fake, gamma=1.0):
+        """Compute MMD using RBF kernel"""
+        K_XX = rbf_kernel(X_real, gamma=gamma)
+        K_YY = rbf_kernel(X_fake, gamma=gamma)
+        K_XY = rbf_kernel(X_real, X_fake, gamma=gamma)
+        
+        mmd = K_XX.mean() + K_YY.mean() - 2 * K_XY.mean()
+        return mmd
+    
+    def filter_samples(self, X_real, X_fake, classifier=None):
+        """Three-stage quality control"""
+        # Stage 1: MMD filtering
+        mmd_score = self.compute_mmd(X_real, X_fake)
+        if mmd_score > self.mmd_threshold:
+            print(f"Warning: High MMD score {mmd_score:.3f}")
+        
+        # Stage 2: Correlation preservation (simplified)
+        real_corr = np.corrcoef(X_real.T)
+        fake_corr = np.corrcoef(X_fake.T)
+        corr_diff = np.linalg.norm(real_corr - fake_corr, 'fro')
+        
+        # Stage 3: Confidence filtering (if classifier provided)
+        if classifier is not None:
+            confidences = classifier.predict_proba(X_fake).max(axis=1)
+            high_conf_mask = confidences > self.conf_threshold
+            X_fake = X_fake[high_conf_mask]
+            print(f"Kept {high_conf_mask.sum()}/{len(high_conf_mask)} samples after confidence filtering")
+        
+        return X_fake, {'mmd': mmd_score, 'corr_diff': corr_diff}
+
+def balance_dataset(X_train, y_train, target_ratio=0.3, epochs=1000):
+    """Main function implementing Algorithm 1"""
+    from collections import Counter
+    
+    # Analyze class distribution
+    class_counts = Counter(y_train)
+    majority_class = max(class_counts, key=class_counts.get)
+    minority_classes = [cls for cls, count in class_counts.items() 
+                       if count < class_counts[majority_class] * target_ratio]
+    
+    print(f"Class distribution: {class_counts}")
+    print(f"Minority classes: {minority_classes}")
+    
+    X_balanced, y_balanced = X_train.copy(), y_train.copy()
+    
+    # Generate samples for each minority class
+    for minority_class in minority_classes:
+        print(f"\nBalancing class {minority_class}...")
+        
+        # Get minority class samples
+        minority_mask = y_train == minority_class
+        X_minority = X_train[minority_mask]
+        
+        if len(X_minority) < 10:  # Skip if too few samples
+            continue
+            
+        # Calculate target samples using logarithmic scaling
+        current_count = len(X_minority)
+        target_count = min(class_counts[majority_class], 
+                          int(current_count * np.log(class_counts[majority_class]/current_count + 1)))
+        n_generate = max(0, target_count - current_count)
+        
+        if n_generate == 0:
+            continue
+            
+        print(f"Generating {n_generate} samples for class {minority_class}")
+        
+        # Train MM-WGAN-GP
+        wgan = MultiModalWGANGP(X_minority.shape[1])
+        X_minority_tensor = torch.FloatTensor(X_minority)
+        
+        for epoch in range(epochs):
+            if len(X_minority) >= 32:  # Use full batch if enough samples
+                batch_indices = np.random.choice(len(X_minority), 32, replace=True)
+            else:
+                batch_indices = np.arange(len(X_minority))
+            
+            batch = X_minority_tensor[batch_indices]
+            critic_losses, gen_loss = wgan.train_step(batch)
+            
+            if epoch % 200 == 0:
+                print(f"Epoch {epoch}: Gen Loss {gen_loss:.4f}")
+        
+        # Generate and filter synthetic samples
+        X_synthetic = wgan.generate_samples(n_generate * 2)  # Generate extra for filtering
+        
+        # Quality control
+        quality_controller = QualityController()
+        X_synthetic_filtered, metrics = quality_controller.filter_samples(X_minority, X_synthetic)
+        
+        # Take only needed amount
+        if len(X_synthetic_filtered) > n_generate:
+            X_synthetic_filtered = X_synthetic_filtered[:n_generate]
+        
+        # Add to balanced dataset
+        X_balanced = np.vstack([X_balanced, X_synthetic_filtered])
+        y_balanced = np.hstack([y_balanced, np.full(len(X_synthetic_filtered), minority_class)])
+        
+        print(f"Added {len(X_synthetic_filtered)} synthetic samples")
+        print(f"Quality metrics: MMD={metrics['mmd']:.4f}, Corr_diff={metrics['corr_diff']:.4f}")
+    
+    print(f"\nFinal dataset size: {len(X_balanced)} (was {len(X_train)})")
+    print(f"Final class distribution: {Counter(y_balanced)}")
+    
+    return X_balanced, y_balanced
+
+# Usage example
+if __name__ == "__main__":
+    # Upload your CSV file to Colab first
+    from google.colab import files
+    print("Upload your CSV file:")
+    uploaded = files.upload()
+    csv_path = list(uploaded.keys())[0]
+    
+    # Run Algorithm 1 with your data
+    X_balanced, y_balanced, X_test, y_test, scaler, label_encoder = balance_dataset_from_csv(
+        csv_path, target_ratio=0.3, epochs=500, save_output=True
+    )
+    
+    print("\n=== Algorithm 1 Complete ===")
+    print("Files saved:")
+    print("- /content/balanced_dataset.csv (training data)")
+    print("- /content/test_dataset.csv (test data)")
+    
+    # Download files
+    files.download("/content/balanced_dataset.csv")
+    files.download("/content/test_dataset.csv")
