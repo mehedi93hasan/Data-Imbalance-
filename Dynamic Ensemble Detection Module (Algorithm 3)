@@ -1,0 +1,507 @@
+# Algorithm 3: Dynamic Ensemble Detection Architecture
+# Implementation for AMTE-IDS
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import GradientBoostingClassifier, IsolationForest
+from sklearn.metrics import accuracy_score, f1_score, classification_report
+from collections import defaultdict
+import warnings
+warnings.filterwarnings('ignore')
+
+class RouterNetwork(nn.Module):
+    """Router network for dynamic classifier weighting"""
+    
+    def __init__(self, input_dim, num_classifiers, hidden_dims=[128, 64]):
+        super(RouterNetwork, self).__init__()
+        
+        layers = []
+        prev_dim = input_dim
+        
+        for hidden_dim in hidden_dims:
+            layers.extend([
+                nn.Linear(prev_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.2)
+            ])
+            prev_dim = hidden_dim
+        
+        layers.extend([
+            nn.Linear(prev_dim, num_classifiers),
+            nn.Softmax(dim=1)
+        ])
+        
+        self.network = nn.Sequential(*layers)
+        
+    def forward(self, x):
+        """Compute classifier weights based on input features"""
+        return self.network(x)
+
+class BiLSTMClassifier(nn.Module):
+    """Bidirectional LSTM for sequential patterns"""
+    
+    def __init__(self, input_dim, hidden_dim=128, num_layers=2, num_classes=2, dropout=0.2):
+        super(BiLSTMClassifier, self).__init__()
+        
+        self.input_transform = nn.Linear(input_dim, hidden_dim)
+        self.lstm = nn.LSTM(hidden_dim, hidden_dim, num_layers, 
+                           batch_first=True, bidirectional=True, dropout=dropout)
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, num_classes)
+        )
+        
+    def forward(self, x):
+        # Transform input and add sequence dimension
+        x_transformed = self.input_transform(x).unsqueeze(1)  # (batch, 1, hidden_dim)
+        
+        # LSTM processing
+        lstm_out, _ = self.lstm(x_transformed)
+        
+        # Take the output from the last time step
+        last_output = lstm_out[:, -1, :]  # (batch, hidden_dim * 2)
+        
+        # Classification
+        output = self.classifier(last_output)
+        return output
+
+class GNNClassifier(nn.Module):
+    """Simple Graph Neural Network for topology-based attacks"""
+    
+    def __init__(self, input_dim, hidden_dim=64, num_classes=2):
+        super(GNNClassifier, self).__init__()
+        
+        # Node feature transformation
+        self.node_transform = nn.Linear(input_dim, hidden_dim)
+        
+        # Graph convolution layers (simplified)
+        self.conv1 = nn.Linear(hidden_dim, hidden_dim)
+        self.conv2 = nn.Linear(hidden_dim, hidden_dim)
+        
+        # Classification head
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim // 2, num_classes)
+        )
+        
+    def create_adjacency_matrix(self, batch_size, device):
+        """Create simple adjacency matrix (simplified for demo)"""
+        # In real implementation, this would be based on network topology
+        adj = torch.eye(batch_size, device=device)
+        return adj
+        
+    def forward(self, x):
+        batch_size = x.size(0)
+        device = x.device
+        
+        # Transform node features
+        h = F.relu(self.node_transform(x))
+        
+        # Create adjacency matrix
+        adj = self.create_adjacency_matrix(batch_size, device)
+        
+        # Graph convolutions (simplified)
+        h = F.relu(self.conv1(torch.matmul(adj, h)))
+        h = F.relu(self.conv2(torch.matmul(adj, h)))
+        
+        # Global pooling (mean)
+        graph_repr = h.mean(dim=0, keepdim=True).repeat(batch_size, 1)
+        
+        # Classification
+        output = self.classifier(graph_repr)
+        return output
+
+class TemperatureScaling(nn.Module):
+    """Temperature scaling for confidence calibration"""
+    
+    def __init__(self):
+        super(TemperatureScaling, self).__init__()
+        self.temperature = nn.Parameter(torch.ones(1))
+        
+    def forward(self, logits):
+        return logits / self.temperature
+    
+    def calibrate(self, logits, labels, lr=0.01, max_iter=50):
+        """Calibrate temperature parameter"""
+        optimizer = torch.optim.LBFGS([self.temperature], lr=lr, max_iter=max_iter)
+        
+        def eval_loss():
+            loss = F.cross_entropy(self.forward(logits), labels)
+            loss.backward()
+            return loss
+        
+        optimizer.step(eval_loss)
+
+class PerformanceTracker:
+    """Track classifier performance history"""
+    
+    def __init__(self, num_classifiers, num_classes):
+        self.num_classifiers = num_classifiers
+        self.num_classes = num_classes
+        self.history = defaultdict(lambda: defaultdict(list))
+        
+    def update(self, classifier_idx, predictions, ground_truth):
+        """Update performance metrics for a classifier"""
+        accuracy = accuracy_score(ground_truth, predictions)
+        f1 = f1_score(ground_truth, predictions, average='weighted')
+        
+        self.history[classifier_idx]['accuracy'].append(accuracy)
+        self.history[classifier_idx]['f1'].append(f1)
+        
+    def get_recent_performance(self, classifier_idx, window=10):
+        """Get recent performance metrics"""
+        if len(self.history[classifier_idx]['accuracy']) == 0:
+            return {'accuracy': 0.5, 'f1': 0.5}
+        
+        recent_acc = np.mean(self.history[classifier_idx]['accuracy'][-window:])
+        recent_f1 = np.mean(self.history[classifier_idx]['f1'][-window:])
+        
+        return {'accuracy': recent_acc, 'f1': recent_f1}
+
+class DynamicEnsembleDetector:
+    """
+    Dynamic Ensemble Detection Module
+    Combines specialized classifiers with adaptive weighting
+    """
+    
+    def __init__(self, input_dim, num_classes, confidence_threshold=0.8):
+        self.input_dim = input_dim
+        self.num_classes = num_classes
+        self.confidence_threshold = confidence_threshold
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Initialize specialized classifiers
+        self.gbdt_classifier = GradientBoostingClassifier(n_estimators=100, random_state=42)
+        self.lstm_classifier = BiLSTMClassifier(input_dim, num_classes=num_classes).to(self.device)
+        self.gnn_classifier = GNNClassifier(input_dim, num_classes=num_classes).to(self.device)
+        self.anomaly_detector = IsolationForest(contamination=0.1, random_state=42)
+        
+        # Router network (4 classifiers: GBDT, LSTM, GNN, Anomaly)
+        self.router = RouterNetwork(input_dim, 4).to(self.device)
+        
+        # Temperature scaling for each classifier
+        self.temperature_scalers = [TemperatureScaling().to(self.device) for _ in range(3)]
+        
+        # Performance tracking
+        self.performance_tracker = PerformanceTracker(4, num_classes)
+        
+        # Optimizers for neural networks
+        self.lstm_optimizer = torch.optim.Adam(self.lstm_classifier.parameters(), lr=0.001)
+        self.gnn_optimizer = torch.optim.Adam(self.gnn_classifier.parameters(), lr=0.001)
+        self.router_optimizer = torch.optim.Adam(self.router.parameters(), lr=0.001)
+        
+    def train_classifiers(self, X_train, y_train, X_val, y_val, epochs=50):
+        """Train all ensemble classifiers"""
+        print("Training specialized classifiers...")
+        
+        # Convert to tensors
+        X_train_tensor = torch.FloatTensor(X_train).to(self.device)
+        y_train_tensor = torch.LongTensor(y_train).to(self.device)
+        X_val_tensor = torch.FloatTensor(X_val).to(self.device)
+        y_val_tensor = torch.LongTensor(y_val).to(self.device)
+        
+        # 1. Train GBDT Classifier
+        print("Training GBDT classifier...")
+        self.gbdt_classifier.fit(X_train, y_train)
+        gbdt_score = self.gbdt_classifier.score(X_val, y_val)
+        print(f"GBDT validation accuracy: {gbdt_score:.4f}")
+        
+        # 2. Train Anomaly Detector
+        print("Training anomaly detector...")
+        self.anomaly_detector.fit(X_train)
+        anomaly_pred = self.anomaly_detector.predict(X_val)
+        # Convert to binary classification for evaluation
+        anomaly_pred_binary = (anomaly_pred == -1).astype(int)
+        normal_mask = (y_val == 0)  # Assume class 0 is normal
+        if normal_mask.sum() > 0:
+            anomaly_score = accuracy_score(normal_mask.astype(int), 1 - anomaly_pred_binary)
+            print(f"Anomaly detector accuracy: {anomaly_score:.4f}")
+        
+        # 3. Train LSTM Classifier
+        print("Training BiLSTM classifier...")
+        criterion = nn.CrossEntropyLoss()
+        
+        for epoch in range(epochs):
+            self.lstm_classifier.train()
+            self.lstm_optimizer.zero_grad()
+            
+            lstm_output = self.lstm_classifier(X_train_tensor)
+            lstm_loss = criterion(lstm_output, y_train_tensor)
+            lstm_loss.backward()
+            self.lstm_optimizer.step()
+            
+            if epoch % 10 == 0:
+                self.lstm_classifier.eval()
+                with torch.no_grad():
+                    val_output = self.lstm_classifier(X_val_tensor)
+                    val_pred = torch.argmax(val_output, dim=1)
+                    val_acc = accuracy_score(y_val, val_pred.cpu().numpy())
+                    print(f"LSTM Epoch {epoch}, Val Accuracy: {val_acc:.4f}")
+        
+        # 4. Train GNN Classifier
+        print("Training GNN classifier...")
+        
+        for epoch in range(epochs):
+            self.gnn_classifier.train()
+            self.gnn_optimizer.zero_grad()
+            
+            gnn_output = self.gnn_classifier(X_train_tensor)
+            gnn_loss = criterion(gnn_output, y_train_tensor)
+            gnn_loss.backward()
+            self.gnn_optimizer.step()
+            
+            if epoch % 10 == 0:
+                self.gnn_classifier.eval()
+                with torch.no_grad():
+                    val_output = self.gnn_classifier(X_val_tensor)
+                    val_pred = torch.argmax(val_output, dim=1)
+                    val_acc = accuracy_score(y_val, val_pred.cpu().numpy())
+                    print(f"GNN Epoch {epoch}, Val Accuracy: {val_acc:.4f}")
+        
+        # 5. Calibrate temperature scaling
+        print("Calibrating temperature scaling...")
+        self._calibrate_temperature(X_val_tensor, y_val_tensor)
+        
+        # 6. Train router network
+        print("Training router network...")
+        self._train_router(X_train_tensor, y_train_tensor, X_val_tensor, y_val_tensor, epochs=30)
+        
+        print("All classifiers trained successfully!")
+    
+    def _calibrate_temperature(self, X_val, y_val):
+        """Calibrate temperature scaling for neural network classifiers"""
+        self.lstm_classifier.eval()
+        self.gnn_classifier.eval()
+        
+        with torch.no_grad():
+            lstm_logits = self.lstm_classifier(X_val)
+            gnn_logits = self.gnn_classifier(X_val)
+        
+        # Calibrate LSTM
+        self.temperature_scalers[0].calibrate(lstm_logits, y_val)
+        print(f"LSTM temperature: {self.temperature_scalers[0].temperature.item():.4f}")
+        
+        # Calibrate GNN
+        self.temperature_scalers[1].calibrate(gnn_logits, y_val)
+        print(f"GNN temperature: {self.temperature_scalers[1].temperature.item():.4f}")
+    
+    def _train_router(self, X_train, y_train, X_val, y_val, epochs=30):
+        """Train the router network"""
+        criterion = nn.CrossEntropyLoss()
+        
+        for epoch in range(epochs):
+            self.router.train()
+            self.router_optimizer.zero_grad()
+            
+            # Get classifier predictions
+            predictions, confidences = self._get_classifier_predictions(X_train)
+            
+            # Get router weights
+            router_weights = self.router(X_train)
+            
+            # Compute ensemble predictions
+            ensemble_pred = self._compute_ensemble_prediction(predictions, confidences, router_weights)
+            
+            # Router loss (classification loss)
+            router_loss = criterion(ensemble_pred, y_train)
+            router_loss.backward()
+            self.router_optimizer.step()
+            
+            if epoch % 10 == 0:
+                val_pred = self.predict(X_val.cpu().numpy())
+                val_acc = accuracy_score(y_val.cpu().numpy(), val_pred)
+                print(f"Router Epoch {epoch}, Val Accuracy: {val_acc:.4f}")
+    
+    def _get_classifier_predictions(self, X):
+        """Get predictions from all classifiers"""
+        X_np = X.cpu().numpy() if isinstance(X, torch.Tensor) else X
+        X_tensor = torch.FloatTensor(X_np).to(self.device) if not isinstance(X, torch.Tensor) else X
+        
+        predictions = []
+        confidences = []
+        
+        # GBDT predictions
+        gbdt_proba = self.gbdt_classifier.predict_proba(X_np)
+        gbdt_pred = torch.FloatTensor(gbdt_proba).to(self.device)
+        gbdt_conf = torch.max(gbdt_pred, dim=1)[0]
+        predictions.append(gbdt_pred)
+        confidences.append(gbdt_conf)
+        
+        # LSTM predictions
+        self.lstm_classifier.eval()
+        with torch.no_grad():
+            lstm_logits = self.lstm_classifier(X_tensor)
+            lstm_logits_cal = self.temperature_scalers[0](lstm_logits)
+            lstm_pred = F.softmax(lstm_logits_cal, dim=1)
+            lstm_conf = torch.max(lstm_pred, dim=1)[0]
+            predictions.append(lstm_pred)
+            confidences.append(lstm_conf)
+        
+        # GNN predictions
+        self.gnn_classifier.eval()
+        with torch.no_grad():
+            gnn_logits = self.gnn_classifier(X_tensor)
+            gnn_logits_cal = self.temperature_scalers[1](gnn_logits)
+            gnn_pred = F.softmax(gnn_logits_cal, dim=1)
+            gnn_conf = torch.max(gnn_pred, dim=1)[0]
+            predictions.append(gnn_pred)
+            confidences.append(gnn_conf)
+        
+        # Anomaly detector (simplified to binary)
+        anomaly_scores = self.anomaly_detector.decision_function(X_np)
+        anomaly_pred = torch.zeros(len(X_np), self.num_classes).to(self.device)
+        anomaly_pred[:, 0] = torch.FloatTensor(anomaly_scores).to(self.device)  # Normal class
+        anomaly_pred[:, 1] = -torch.FloatTensor(anomaly_scores).to(self.device)  # Anomaly class
+        anomaly_pred = F.softmax(anomaly_pred, dim=1)
+        anomaly_conf = torch.max(anomaly_pred, dim=1)[0]
+        predictions.append(anomaly_pred)
+        confidences.append(anomaly_conf)
+        
+        return predictions, confidences
+    
+    def _compute_ensemble_prediction(self, predictions, confidences, router_weights):
+        """Compute weighted ensemble prediction"""
+        ensemble_output = torch.zeros_like(predictions[0])
+        
+        for i, (pred, conf, weight) in enumerate(zip(predictions, confidences, router_weights.T)):
+            # Apply confidence threshold
+            mask = conf > self.confidence_threshold
+            weight_expanded = weight.unsqueeze(1).expand_as(pred)
+            
+            # Only use predictions above confidence threshold
+            weighted_pred = torch.zeros_like(pred)
+            weighted_pred[mask] = pred[mask] * weight_expanded[mask]
+            ensemble_output += weighted_pred
+        
+        return ensemble_output
+    
+    def predict(self, X):
+        """Dynamic ensemble prediction (Algorithm 3)"""
+        X_tensor = torch.FloatTensor(X).to(self.device)
+        
+        # Get router weights
+        self.router.eval()
+        with torch.no_grad():
+            router_weights = self.router(X_tensor)
+        
+        # Get classifier predictions
+        predictions, confidences = self._get_classifier_predictions(X_tensor)
+        
+        # Compute ensemble predictions
+        ensemble_pred = self._compute_ensemble_prediction(predictions, confidences, router_weights)
+        
+        # Final predictions
+        final_pred = torch.argmax(ensemble_pred, dim=1)
+        
+        # Fallback to anomaly detector for low-confidence samples
+        max_conf = torch.max(ensemble_pred, dim=1)[0]
+        low_conf_mask = max_conf < self.confidence_threshold
+        
+        if low_conf_mask.sum() > 0:
+            anomaly_pred = self.anomaly_detector.predict(X[low_conf_mask.cpu().numpy()])
+            final_pred[low_conf_mask] = torch.LongTensor(anomaly_pred).to(self.device)
+        
+        return final_pred.cpu().numpy()
+    
+    def evaluate(self, X_test, y_test):
+        """Comprehensive evaluation of the ensemble"""
+        predictions = self.predict(X_test)
+        
+        # Compute metrics
+        accuracy = accuracy_score(y_test, predictions)
+        f1_macro = f1_score(y_test, predictions, average='macro')
+        f1_weighted = f1_score(y_test, predictions, average='weighted')
+        
+        # Generate classification report
+        report = classification_report(y_test, predictions)
+        
+        return {
+            'accuracy': accuracy,
+            'f1_macro': f1_macro,
+            'f1_weighted': f1_weighted,
+            'classification_report': report,
+            'predictions': predictions
+        }
+
+def load_mvfl_features(csv_path):
+    """Load MVFL features from CSV"""
+    df = pd.read_csv(csv_path)
+    
+    # Separate MVFL features, attention weights, and labels
+    mvfl_cols = [col for col in df.columns if col.startswith('mvfl_feature_')]
+    attention_cols = [col for col in df.columns if 'attention' in col]
+    
+    X_mvfl = df[mvfl_cols].values
+    attention_weights = df[attention_cols].values
+    y = df['attack_type'].values
+    
+    print(f"Loaded MVFL features: {X_mvfl.shape}")
+    print(f"Attention weights: {attention_weights.shape}")
+    
+    return X_mvfl, attention_weights, y
+
+def train_dynamic_ensemble(mvfl_csv_path, test_split=0.2):
+    """Train the Dynamic Ensemble Detection system"""
+    
+    # Load MVFL features
+    X, attention_weights, y = load_mvfl_features(mvfl_csv_path)
+    
+    # Split data
+    from sklearn.model_selection import train_test_split
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_split, stratify=y, random_state=42
+    )
+    
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train, y_train, test_size=0.2, stratify=y_train, random_state=42
+    )
+    
+    print(f"Training set: {X_train.shape}")
+    print(f"Validation set: {X_val.shape}")
+    print(f"Test set: {X_test.shape}")
+    
+    # Initialize and train Dynamic Ensemble Detector
+    input_dim = X.shape[1]
+    num_classes = len(np.unique(y))
+    
+    ensemble = DynamicEnsembleDetector(input_dim, num_classes)
+    ensemble.train_classifiers(X_train, y_train, X_val, y_val)
+    
+    # Evaluate on test set
+    print("\n=== Final Evaluation ===")
+    results = ensemble.evaluate(X_test, y_test)
+    
+    print(f"Test Accuracy: {results['accuracy']:.4f}")
+    print(f"Test F1-Score (Macro): {results['f1_macro']:.4f}")
+    print(f"Test F1-Score (Weighted): {results['f1_weighted']:.4f}")
+    print("\nDetailed Classification Report:")
+    print(results['classification_report'])
+    
+    # Save results
+    results_df = pd.DataFrame({
+        'true_labels': y_test,
+        'predictions': results['predictions']
+    })
+    results_df.to_csv("/content/ensemble_results.csv", index=False)
+    print("Results saved to: /content/ensemble_results.csv")
+    
+    return ensemble, results
+
+# Usage example
+if __name__ == "__main__":
+    # Train Dynamic Ensemble on MVFL features
+    mvfl_features_path = "/content/mvfl_features.csv"
+    
+    print("Training Dynamic Ensemble Detection System...")
+    ensemble_model, results = train_dynamic_ensemble(mvfl_features_path)
+    
+    print("\n=== Algorithm 3 Complete ===")
+    print("Dynamic Ensemble Detection system trained successfully!")
+    print("AMTE-IDS framework is now ready for deployment!")
