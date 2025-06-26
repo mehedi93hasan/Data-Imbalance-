@@ -1,0 +1,234 @@
+# Data Preprocessing Module for AMTE-IDS
+# Concise implementation for Google Colab
+
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler, LabelEncoder, MinMaxScaler
+from sklearn.impute import SimpleImputer
+from sklearn.decomposition import PCA
+import warnings
+warnings.filterwarnings('ignore')
+
+class DataPreprocessor:
+    def __init__(self):
+        self.scaler = StandardScaler()
+        self.label_encoder = LabelEncoder()
+        self.imputer = SimpleImputer(strategy='median')
+        self.pca = PCA(n_components=0.95)  # Keep 95% variance
+        self.fitted = False
+        
+    def load_csv(self, file_path):
+        """Load NSL-KDD dataset from CSV file"""
+        try:
+            # Load CSV and automatically detect columns
+            df = pd.read_csv(file_path)
+            
+            # If no headers, assume last column is target
+            if df.columns[0].startswith('Unnamed') or all(str(col).isdigit() for col in df.columns):
+                # Create generic column names
+                feature_cols = [f'feature_{i}' for i in range(len(df.columns)-1)]
+                df.columns = feature_cols + ['attack_type']
+            
+            # Ensure target column exists
+            if 'attack_type' not in df.columns:
+                # Assume last column is target
+                cols = list(df.columns)
+                cols[-1] = 'attack_type'
+                df.columns = cols
+            
+            print(f"Dataset loaded: {df.shape}")
+            print(f"Columns: {list(df.columns)}")
+            return df
+            
+        except Exception as e:
+            print(f"Error loading CSV: {e}")
+            return None
+    
+    def clean_data(self, df):
+        """Basic data cleaning"""
+        # Remove duplicates
+        df = df.drop_duplicates()
+        
+        # Handle infinite values
+        df = df.replace([np.inf, -np.inf], np.nan)
+        
+        # Remove rows with too many missing values (>50%)
+        threshold = len(df.columns) * 0.5
+        df = df.dropna(thresh=threshold)
+        
+        return df
+    
+    def encode_categorical(self, df):
+        """Encode categorical features"""
+        categorical_cols = df.select_dtypes(include=['object']).columns
+        
+        for col in categorical_cols:
+            if col != 'attack_type':  # Don't encode target variable yet
+                df[col] = pd.Categorical(df[col]).codes
+        
+        return df
+    
+    def encode_labels(self, labels, fit=True):
+        """Encode attack labels"""
+        # Simplify attack types to main categories
+        attack_mapping = {
+            'normal': 'Normal',
+            'back': 'DoS', 'land': 'DoS', 'neptune': 'DoS', 'pod': 'DoS', 'smurf': 'DoS', 'teardrop': 'DoS',
+            'ipsweep': 'Probe', 'nmap': 'Probe', 'portsweep': 'Probe', 'satan': 'Probe',
+            'ftp_write': 'R2L', 'guess_passwd': 'R2L', 'imap': 'R2L', 'multihop': 'R2L',
+            'phf': 'R2L', 'spy': 'R2L', 'warezclient': 'R2L', 'warezmaster': 'R2L',
+            'buffer_overflow': 'U2R', 'loadmodule': 'U2R', 'perl': 'U2R', 'rootkit': 'U2R'
+        }
+        
+        # Map attack types
+        simplified_labels = [attack_mapping.get(label, label) for label in labels]
+        
+        if fit:
+            return self.label_encoder.fit_transform(simplified_labels)
+        else:
+            return self.label_encoder.transform(simplified_labels)
+    
+    def temporal_features(self, df):
+        """Extract temporal features if duration exists"""
+        if 'duration' in df.columns:
+            # Create duration-based features
+            df['log_duration'] = np.log1p(df['duration'])
+            df['duration_category'] = pd.cut(df['duration'], bins=5, labels=['very_short', 'short', 'medium', 'long', 'very_long'])
+            df['duration_category'] = pd.Categorical(df['duration_category']).codes
+        
+        return df
+    
+    def normalize_features(self, df, fit=True):
+        """Normalize numerical features"""
+        # Separate numerical columns
+        numerical_cols = df.select_dtypes(include=[np.number]).columns
+        
+        if fit:
+            df[numerical_cols] = self.scaler.fit_transform(df[numerical_cols])
+        else:
+            df[numerical_cols] = self.scaler.transform(df[numerical_cols])
+        
+        return df
+    
+    def handle_missing_values(self, df, fit=True):
+        """Handle missing values"""
+        if fit:
+            df_imputed = pd.DataFrame(self.imputer.fit_transform(df), 
+                                    columns=df.columns, index=df.index)
+        else:
+            df_imputed = pd.DataFrame(self.imputer.transform(df), 
+                                    columns=df.columns, index=df.index)
+        return df_imputed
+    
+    def save_processed_data(self, X, y, prefix="processed"):
+        """Save preprocessed data to CSV files"""
+        try:
+            # Convert to DataFrames
+            if hasattr(X, 'shape'):  # numpy array
+                X_df = pd.DataFrame(X, columns=[f'feature_{i}' for i in range(X.shape[1])])
+            else:
+                X_df = pd.DataFrame(X)
+            
+            y_df = pd.DataFrame(y, columns=['attack_type'])
+            
+            # Combine features and labels
+            combined_df = pd.concat([X_df, y_df], axis=1)
+            
+            # Save to CSV
+            output_path = f"/content/{prefix}_data.csv"
+            combined_df.to_csv(output_path, index=False)
+            
+            print(f"Preprocessed data saved to: {output_path}")
+            return output_path
+            
+        except Exception as e:
+            print(f"Error saving data: {e}")
+            return None
+    
+    def preprocess(self, df, target_col='attack_type', fit=True, apply_pca=False):
+        """Complete preprocessing pipeline"""
+        print(f"Original data shape: {df.shape}")
+        
+        # Separate features and target
+        if target_col in df.columns:
+            X = df.drop(target_col, axis=1)
+            y = df[target_col]
+        else:
+            X = df.copy()
+            y = None
+        
+        # Data cleaning
+        X = self.clean_data(X)
+        
+        # Handle missing values
+        X = self.handle_missing_values(X, fit=fit)
+        
+        # Temporal features
+        X = self.temporal_features(X)
+        
+        # Encode categorical features
+        X = self.encode_categorical(X)
+        
+        # Normalize features
+        X = self.normalize_features(X, fit=fit)
+        
+        # Optional PCA
+        if apply_pca:
+            X = self.reduce_dimensionality(X, fit=fit)
+        
+        # Encode labels
+        if y is not None:
+            y_encoded = self.encode_labels(y, fit=fit)
+        else:
+            y_encoded = None
+        
+        if fit:
+            self.fitted = True
+            
+        print(f"Processed data shape: {X.shape}")
+        if y_encoded is not None:
+            print(f"Class distribution: {np.bincount(y_encoded)}")
+        
+        return X, y_encoded
+
+# Quick usage example for CSV files
+def preprocess_csv_data(csv_file_path, save_output=True):
+    """Simple preprocessing for your CSV file"""
+    # Initialize preprocessor
+    preprocessor = DataPreprocessor()
+    
+    # Load your CSV file
+    df = preprocessor.load_csv(csv_file_path)
+    
+    if df is not None:
+        # Split into train/test (80/20)
+        from sklearn.model_selection import train_test_split
+        train_df, test_df = train_test_split(df, test_size=0.2, random_state=42, 
+                                           stratify=df['attack_type'])
+        
+        # Preprocess training data
+        X_train, y_train = preprocessor.preprocess(train_df, fit=True, apply_pca=True)
+        
+        # Preprocess test data
+        X_test, y_test = preprocessor.preprocess(test_df, fit=False, apply_pca=True)
+        
+        print("\n=== Preprocessing Complete ===")
+        print(f"Training set: {X_train.shape}")
+        print(f"Test set: {X_test.shape}")
+        print(f"Classes: {preprocessor.label_encoder.classes_}")
+        
+        # Save preprocessed data
+        if save_output:
+            train_path = preprocessor.save_processed_data(X_train, y_train, "train")
+            test_path = preprocessor.save_processed_data(X_test, y_test, "test")
+            print(f"\nSaved files:\n- Training: {train_path}\n- Testing: {test_path}")
+        
+        return X_train, y_train, X_test, y_test, preprocessor
+    
+    return None
+
+# Run preprocessing with your CSV file
+if __name__ == "__main__":
+    # Replace 'your_file.csv' with your actual CSV file path
+    csv_path = "/content/your_nsl_kdd_file.csv"  # Upload to Colab first
+    data = preprocess_csv_data(csv_path)
