@@ -1,5 +1,4 @@
 # CIC-IDS2017 Data Preprocessing
-# Concise implementation for Google Colab
 
 import pandas as pd
 import numpy as np
