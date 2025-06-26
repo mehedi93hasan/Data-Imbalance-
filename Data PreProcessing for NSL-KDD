@@ -1,5 +1,4 @@
 # Data Preprocessing Module for AMTE-IDS
-# Concise implementation for Google Colab
 
 import pandas as pd
 import numpy as np
