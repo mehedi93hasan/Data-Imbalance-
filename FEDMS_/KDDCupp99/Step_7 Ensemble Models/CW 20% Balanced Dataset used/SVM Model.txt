@@ -1,0 +1,52 @@
+import pandas as pd
+import pickle
+from sklearn.model_selection import train_test_split
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import accuracy_score, classification_report
+
+# Load data
+df = pd.read_csv('CW_20percent_kddcup99_minmax.csv')
+X = df.drop('label', axis=1)  # Replace 'target_column' with your target
+y = df['label']
+
+# Encode labels if categorical
+le = LabelEncoder()
+y_encoded = le.fit_transform(y)
+
+# Scale features (important for SVM)
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(
+    X_scaled, y_encoded, test_size=0.2, random_state=42
+)
+
+# Train SVM model
+svm_model = SVC(
+    kernel='rbf',
+    C=1.0,
+    gamma='scale',
+    random_state=42
+)
+
+svm_model.fit(X_train, y_train)
+
+# Evaluate model
+y_pred = svm_model.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
+print(f"Accuracy: {accuracy:.4f}")
+
+# Save model and preprocessing objects
+model_data = {
+    'model': svm_model,
+    'scaler': scaler,
+    'label_encoder': le,
+    'feature_names': X.columns.tolist()
+}
+
+with open('CW_20percent_svm_model_kddcup.pkl', 'wb') as f:
+    pickle.dump(model_data, f)
+
+print("Model saved as CW_20percent_svm_model_kddcup.pkl")

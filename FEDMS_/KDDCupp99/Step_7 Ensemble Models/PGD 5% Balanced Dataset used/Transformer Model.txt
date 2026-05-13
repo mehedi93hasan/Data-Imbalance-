@@ -1,0 +1,321 @@
+import pandas as pd
+import numpy as np
+import pickle
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, LayerNormalization, MultiHeadAttention, GlobalAveragePooling1D
+from tensorflow.keras.utils import to_categorical
+import tensorflow as tf
+from tensorflow.keras.utils import register_keras_serializable
+
+@register_keras_serializable()  # ✅ Add this decorator
+class TransformerBlock(tf.keras.layers.Layer):
+    def __init__(self, embed_dim, num_heads, ff_dim, rate=0.1, **kwargs):
+        super(TransformerBlock, self).__init__(**kwargs)  # ✅ Add **kwargs
+        self.embed_dim = embed_dim  # ✅ Store as attributes
+        self.num_heads = num_heads
+        self.ff_dim = ff_dim
+        self.rate = rate
+
+        self.att = MultiHeadAttention(num_heads=num_heads, key_dim=embed_dim)
+        self.ffn = Sequential([Dense(ff_dim, activation="relu"), Dense(embed_dim)])
+        self.layernorm1 = LayerNormalization(epsilon=1e-6)
+        self.layernorm2 = LayerNormalization(epsilon=1e-6)
+        self.dropout1 = Dropout(rate)
+        self.dropout2 = Dropout(rate)
+
+    def call(self, inputs):
+        attn_output = self.att(inputs, inputs)
+        attn_output = self.dropout1(attn_output)
+        out1 = self.layernorm1(inputs + attn_output)
+        ffn_output = self.ffn(out1)
+        ffn_output = self.dropout2(ffn_output)
+        return self.layernorm2(out1 + ffn_output)
+
+    def get_config(self):  # ✅ Add this method
+        config = super().get_config()
+        config.update({
+            "embed_dim": self.embed_dim,
+            "num_heads": self.num_heads,
+            "ff_dim": self.ff_dim,
+            "rate": self.rate,
+        })
+        return config
+
+def create_transformer_model(input_shape, num_classes, embed_dim=32, num_heads=2, ff_dim=32):
+    """
+    Create a Transformer model for classification
+
+    Args:
+        input_shape: Shape of input data (sequence_length, features)
+        num_classes: Number of output classes
+        embed_dim: Embedding dimension
+        num_heads: Number of attention heads
+        ff_dim: Feed-forward dimension
+
+    Returns:
+        Compiled Keras model
+    """
+    inputs = tf.keras.Input(shape=input_shape)
+
+    # Embedding layer
+    x = Dense(embed_dim)(inputs)
+
+    # Transformer block
+    transformer_block = TransformerBlock(embed_dim, num_heads, ff_dim)
+    x = transformer_block(x)
+
+    # Global pooling
+    x = GlobalAveragePooling1D()(x)
+
+    # Dense layers
+    x = Dropout(0.1)(x)
+    x = Dense(20, activation="relu")(x)
+    x = Dropout(0.1)(x)
+
+    # Output layer
+    outputs = Dense(num_classes, activation="softmax")(x)
+
+    # Create model
+    model = tf.keras.Model(inputs=inputs, outputs=outputs)
+
+    return model
+
+def main():
+    """Main training function"""
+
+    print("🎯 Starting Transformer Model Training")
+    print("=" * 50)
+
+    # ===== STEP 1: LOAD AND PREPARE DATA =====
+    print("📂 Loading and preparing data...")
+
+    # Load data - UPDATE THIS PATH
+    csv_path = 'PGD_5percent_kddcup99_minmax.csv'  # 🔹 UPDATE THIS PATH
+
+    try:
+        df = pd.read_csv(csv_path)
+        print(f"✓ Data loaded successfully: {df.shape}")
+        print(f"  Columns: {list(df.columns)}")
+    except Exception as e:
+        print(f"❌ Error loading data: {e}")
+        print("Please update the csv_path variable with your correct file path")
+        return
+
+    # Prepare features and target
+    if 'label' in df.columns:
+        X = df.drop('label', axis=1).values
+        y = df['label'].values
+        print(f"✓ Using 'label' column as target")
+    else:
+        print("Available columns:", df.columns.tolist())
+        target_col = input("Enter the name of your target column: ")
+        X = df.drop(target_col, axis=1).values
+        y = df[target_col].values
+
+    print(f"  Features shape: {X.shape}")
+    print(f"  Target shape: {y.shape}")
+    print(f"  Unique classes: {np.unique(y)}")
+
+    # ===== STEP 2: ENCODE LABELS =====
+    print("\n🔢 Encoding labels...")
+
+    le = LabelEncoder()
+    y_encoded = le.fit_transform(y)
+    y_categorical = to_categorical(y_encoded)
+
+    print(f"✓ Labels encoded: {len(le.classes_)} classes")
+    print(f"  Class mapping: {dict(zip(le.classes_, range(len(le.classes_))))}")
+    print(f"  Categorical shape: {y_categorical.shape}")
+
+    # ===== STEP 3: SCALE FEATURES =====
+    print("\n📏 Scaling features...")
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    print(f"✓ Features scaled")
+    print(f"  Mean: {X_scaled.mean():.6f}")
+    print(f"  Std: {X_scaled.std():.6f}")
+
+    # ===== STEP 4: RESHAPE FOR TRANSFORMER =====
+    print("\n🔄 Reshaping data for Transformer...")
+
+    # Reshape for Transformer (samples, sequence_length, features)
+    X_reshaped = X_scaled.reshape(X_scaled.shape[0], X_scaled.shape[1], 1)
+
+    print(f"✓ Data reshaped: {X_reshaped.shape}")
+    print(f"  Format: (samples, sequence_length, features)")
+
+    # ===== STEP 5: SPLIT DATA =====
+    print("\n✂️ Splitting data...")
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_reshaped, y_categorical, test_size=0.2, random_state=42, stratify=y_encoded
+    )
+
+    print(f"✓ Data split:")
+    print(f"  Training: {X_train.shape[0]} samples")
+    print(f"  Testing: {X_test.shape[0]} samples")
+
+    # ===== STEP 6: CREATE MODEL =====
+    print("\n🧠 Creating Transformer model...")
+
+    # Model parameters
+    embed_dim = 32
+    num_heads = 2
+    ff_dim = 32
+
+    # Create model
+    input_shape = (X_reshaped.shape[1], 1)  # (sequence_length, features)
+    num_classes = y_categorical.shape[1]
+
+    model = create_transformer_model(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        embed_dim=embed_dim,
+        num_heads=num_heads,
+        ff_dim=ff_dim
+    )
+
+    # Compile model
+    model.compile(
+        optimizer='adam',
+        loss='categorical_crossentropy',
+        metrics=['accuracy']
+    )
+
+    print(f"✓ Model created and compiled")
+    print(f"  Input shape: {input_shape}")
+    print(f"  Output classes: {num_classes}")
+    print(f"  Total parameters: {model.count_params():,}")
+
+    # Display model summary
+    print("\n📋 Model Architecture:")
+    model.summary()
+
+    # ===== STEP 7: TRAIN MODEL =====
+    print("\n🚀 Training model...")
+
+    # Training parameters
+    epochs = 30
+    batch_size = 32
+    validation_split = 0.2
+
+    print(f"  Epochs: {epochs}")
+    print(f"  Batch size: {batch_size}")
+    print(f"  Validation split: {validation_split}")
+
+    # Train model
+    history = model.fit(
+        X_train, y_train,
+        epochs=epochs,
+        batch_size=batch_size,
+        validation_split=validation_split,
+        verbose=1
+    )
+
+    print(f"✓ Training completed!")
+
+    # ===== STEP 8: EVALUATE MODEL =====
+    print("\n📊 Evaluating model...")
+
+    # Evaluate on test set
+    test_loss, test_accuracy = model.evaluate(X_test, y_test, verbose=0)
+
+    print(f"✓ Test Results:")
+    print(f"  Test Loss: {test_loss:.4f}")
+    print(f"  Test Accuracy: {test_accuracy:.4f}")
+
+    # ===== STEP 9: SAVE MODEL =====
+    print("\n💾 Saving model...")
+
+    # Prepare model data
+    model_data = {
+        'model': model,
+        'scaler': scaler,
+        'label_encoder': le,
+        'input_shape': input_shape,
+        'num_classes': num_classes,
+        'class_names': le.classes_,
+        'feature_names': df.drop('label', axis=1).columns.tolist() if 'label' in df.columns else None
+    }
+
+    # Save with pickle
+    pkl_filename = 'PGD_5percent_transformer_model_kddcup.pkl'
+
+    try:
+        with open(pkl_filename, 'wb') as f:
+            pickle.dump(model_data, f)
+        print(f"✓ Model saved as {pkl_filename}")
+    except Exception as e:
+        print(f"❌ Error saving with pickle: {e}")
+
+        # Alternative: Save model directly
+        try:
+            model.save('transformer_model_kddcup.h5')
+            print(f"✓ Model saved as transformer_model_kddcup.h5 (alternative)")
+        except Exception as e2:
+            print(f"❌ Error saving with .h5: {e2}")
+
+    # ===== STEP 10: TEST MODEL LOADING =====
+    print("\n🔍 Testing model loading...")
+
+    try:
+        # Test loading
+        with open(pkl_filename, 'rb') as f:
+            loaded_data = pickle.load(f)
+
+        loaded_model = loaded_data['model']
+
+        # Test prediction
+        test_sample = X_test[0:1]  # First test sample
+        prediction = loaded_model.predict(test_sample, verbose=0)
+
+        print(f"✓ Model loading test successful!")
+        print(f"  Test prediction shape: {prediction.shape}")
+        print(f"  Predicted class: {np.argmax(prediction)}")
+
+    except Exception as e:
+        print(f"⚠️  Model loading test failed: {e}")
+        print("  This might affect integration with the adversarial defense system")
+
+    # ===== SUMMARY =====
+    print("\n" + "=" * 50)
+    print("🎯 TRAINING SUMMARY")
+    print("=" * 50)
+    print(f"✅ Model trained successfully!")
+    print(f"   Architecture: Transformer with {embed_dim}D embeddings")
+    print(f"   Parameters: {model.count_params():,}")
+    print(f"   Test Accuracy: {test_accuracy:.4f}")
+    print(f"   Saved as: {pkl_filename}")
+    print(f"   Classes: {len(le.classes_)}")
+    print(f"   Features: {X.shape[1]}")
+
+    print(f"\n🔧 Next Steps:")
+    print(f"   1. Use this model in your adversarial defense system")
+    print(f"   2. The model is now compatible with @register_keras_serializable()")
+    print(f"   3. Update your defense system paths to include this model")
+
+    return model, model_data
+
+# ===== EXECUTION =====
+if __name__ == "__main__":
+    print("🎯 TRANSFORMER MODEL TRAINING WITH PROPER SERIALIZATION")
+    print("=" * 70)
+
+    # Run training
+    try:
+        model, model_data = main()
+        print(f"\n✅ ALL DONE! Your transformer model is ready for the adversarial defense system.")
+
+    except KeyboardInterrupt:
+        print(f"\n⚠️  Training interrupted by user")
+
+    except Exception as e:
+        print(f"\n❌ Error during training: {e}")
+        print(f"\n🔧 Troubleshooting:")
+        print(f"   1. Check your CSV file path")
+        print(f"   2. Ensure you have TensorFlow installed: pip install tensorflow")
+        print(f"   3. Check your data format (features + label column)")
