@@ -1,0 +1,48 @@
+import pandas as pd
+import pickle
+import xgboost as xgb
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import accuracy_score
+
+# Load data
+df = pd.read_csv('PGD_10percent_kddcup99_minmax.csv')
+X = df.drop('label', axis=1)  # Replace 'target_column' with your target
+y = df['label']
+
+# Encode labels if categorical
+le = LabelEncoder()
+y_encoded = le.fit_transform(y)
+
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y_encoded, test_size=0.2, random_state=42
+)
+
+# Train XGBoost model
+xgb_model = xgb.XGBClassifier(
+    n_estimators=100,
+    max_depth=6,
+    learning_rate=0.1,
+    random_state=42,
+    eval_metric='logloss'
+)
+
+xgb_model.fit(X_train, y_train)
+
+# Evaluate model
+y_pred = xgb_model.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
+print(f"Accuracy: {accuracy:.4f}")
+
+# Save model and label encoder
+model_data = {
+    'model': xgb_model,
+    'label_encoder': le,
+    'feature_names': X.columns.tolist()
+}
+
+with open('PGD_10percent_xgboost_model_kddcup.pkl', 'wb') as f:
+    pickle.dump(model_data, f)
+
+print("Model saved as PGD_10percent_xgboost_model_kddcup.pkl")
