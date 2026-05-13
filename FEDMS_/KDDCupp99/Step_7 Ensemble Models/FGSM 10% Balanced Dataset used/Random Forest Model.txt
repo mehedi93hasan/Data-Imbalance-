@@ -1,0 +1,47 @@
+import pandas as pd
+import pickle
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import accuracy_score, classification_report
+
+# Load data
+df = pd.read_csv('FGSM_10percent_kddcup99_minmax.csv')
+X = df.drop('label', axis=1)  # Replace 'target_column' with your target
+y = df['label']
+
+# Encode labels if categorical
+le = LabelEncoder()
+y_encoded = le.fit_transform(y)
+
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y_encoded, test_size=0.2, random_state=42
+)
+
+# Train Random Forest model
+rf_model = RandomForestClassifier(
+    n_estimators=100,
+    max_depth=10,
+    random_state=42,
+    n_jobs=-1
+)
+
+rf_model.fit(X_train, y_train)
+
+# Evaluate model
+y_pred = rf_model.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
+print(f"Accuracy: {accuracy:.4f}")
+
+# Save model and label encoder
+model_data = {
+    'model': rf_model,
+    'label_encoder': le,
+    'feature_names': X.columns.tolist()
+}
+
+with open('FGSM_10percent_random_forest_model_kddcup.pkl', 'wb') as f:
+    pickle.dump(model_data, f)
+
+print("Model saved as FGSM_10percent_random_forest_model_kddcup.pkl")
