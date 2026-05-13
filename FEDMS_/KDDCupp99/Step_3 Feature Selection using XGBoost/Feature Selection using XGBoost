@@ -1,0 +1,161 @@
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report
+import matplotlib.pyplot as plt
+from xgboost import plot_importance
+
+# Load the KDDCup99 dataset
+# Adjust the file path as needed for your environment
+df = pd.read_csv('kddcup99_minmax.csv')
+print(df.columns)
+
+df.head()
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import xgboost as xgb
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report
+
+# Display basic information
+print("Dataset Shape:", df.shape)
+print("\nFeature names:")
+print(df.columns.tolist())
+
+# Check for NaN values in the target
+print("\nChecking for NaN values in target variable:")
+print("Number of NaN values in 'label':", df['label'].isna().sum())
+
+# Handle NaN values in the target by removing those rows
+if df['label'].isna().sum() > 0:
+    print(f"Removing {df['label'].isna().sum()} rows with NaN target values")
+    df = df.dropna(subset=['label'])
+
+# Preprocess the data
+# Assuming 'label' or 'attack_cat' is your target column
+# For binary classification (normal vs. attack)
+X = df.drop(['label', 'id'], axis=1, errors='ignore')  # Adjust column names as needed
+y = df['label']  # Adjust target column name as needed
+
+# Print class distribution to verify
+unique_classes = np.unique(y)
+print("\nUnique classes in target:", unique_classes)
+print("Number of unique classes:", len(unique_classes))
+print("Class distribution:", pd.Series(y).value_counts())
+
+# Handle categorical features if present
+X = pd.get_dummies(X)
+
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Verify no NaNs in training and test sets
+print("\nVerifying no NaNs in split data:")
+print("NaNs in X_train:", X_train.isna().sum().sum())
+print("NaNs in y_train:", y_train.isna().sum())
+print("NaNs in X_test:", X_test.isna().sum().sum())
+print("NaNs in y_test:", y_test.isna().sum())
+
+# Fill any remaining NaNs in feature matrices (if needed)
+if X_train.isna().sum().sum() > 0:
+    X_train = X_train.fillna(0)
+if X_test.isna().sum().sum() > 0:
+    X_test = X_test.fillna(0)
+
+# Train XGBoost model with proper settings based on number of classes
+num_classes = len(unique_classes)
+if num_classes == 2:
+    print("\nTraining binary classification model")
+    model = xgb.XGBClassifier(
+        objective='binary:logistic',
+        n_estimators=100,
+        learning_rate=0.1,
+        random_state=42
+    )
+else:
+    print(f"\nTraining multi-class classification model with {num_classes} classes")
+    model = xgb.XGBClassifier(
+        objective='multi:softprob',
+        num_class=num_classes,
+        n_estimators=100,
+        learning_rate=0.1,
+        random_state=42
+    )
+
+model.fit(X_train, y_train)
+
+# Get feature importance
+feature_importance = model.feature_importances_
+features = X.columns
+
+# Create DataFrame of features and their importance scores
+feature_importance_df = pd.DataFrame({
+    'Feature': features,
+    'Importance': feature_importance
+})
+
+# Sort by importance
+feature_importance_df = feature_importance_df.sort_values('Importance', ascending=False)
+
+# Display top 30 features
+print("\nTop 30 most important features:")
+print(feature_importance_df.head(30))
+
+# Plot feature importance
+plt.figure(figsize=(12, 8))
+plt.bar(feature_importance_df['Feature'].head(30), feature_importance_df['Importance'].head(30))
+plt.xticks(rotation=90)
+plt.title('Top 30 Feature Importance in Network Security Dataset')
+plt.tight_layout()
+plt.savefig('feature_importance.png')  # Save figure to disk
+plt.show()
+
+# Select top N features (e.g., top 30)
+top_features = feature_importance_df['Feature'].head(30).tolist()
+X_train_selected = X_train[top_features]
+X_test_selected = X_test[top_features]
+
+# Train a new model with selected features
+if num_classes == 2:
+    model_selected = xgb.XGBClassifier(
+        objective='binary:logistic',
+        n_estimators=100,
+        learning_rate=0.1,
+        random_state=42
+    )
+else:
+    model_selected = xgb.XGBClassifier(
+        objective='multi:softprob',
+        num_class=num_classes,
+        n_estimators=100,
+        learning_rate=0.1,
+        random_state=42
+    )
+
+model_selected.fit(X_train_selected, y_train)
+
+# Evaluate full model
+y_pred_full = model.predict(X_test)
+print("\nFull Model Performance:")
+print("Accuracy:", accuracy_score(y_test, y_pred_full))
+print(classification_report(y_test, y_pred_full))
+
+# Evaluate model with selected features
+y_pred_selected = model_selected.predict(X_test_selected)
+print("\nSelected Features Model Performance:")
+print("Accuracy:", accuracy_score(y_test, y_pred_selected))
+print(classification_report(y_test, y_pred_selected))
+
+# Save selected features to CSV
+selected_features_df = pd.DataFrame({'Selected_Features': top_features})
+selected_features_df.to_csv('selected_features_network.csv', index=False)
+print("\nSelected features saved to 'selected_features_network.csv'")
+
+# Save the models if needed
+model.save_model('full_model.json')
+model_selected.save_model('selected_features_model.json')
+print("\nModels saved to disk.")
+

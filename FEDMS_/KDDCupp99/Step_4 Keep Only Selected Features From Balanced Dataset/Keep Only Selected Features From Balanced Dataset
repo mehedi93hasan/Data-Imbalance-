@@ -1,0 +1,21 @@
+import pandas as pd
+
+# Load files
+selected_features_df = pd.read_csv('selected_features_network.csv', header=None)
+kdd_df = pd.read_csv('kddcup99_minmax.csv')
+
+# Get selected feature names (all values from first column including header)
+selected_features = selected_features_df.iloc[:, 0].dropna().tolist()
+
+# Add label column to selected features
+columns_to_keep = selected_features + ['label']
+
+# Create new dataset with selected columns
+new_df = kdd_df[columns_to_keep]
+
+# Save new dataset
+new_df.to_csv('kdd_selected_features.csv', index=False)
+
+print(f"Original shape: {kdd_df.shape}")
+print(f"New shape: {new_df.shape}")
+print("File saved as 'kdd_selected_features.csv'")

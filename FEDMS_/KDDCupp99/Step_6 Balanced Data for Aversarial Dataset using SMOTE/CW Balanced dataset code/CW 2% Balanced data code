@@ -1,0 +1,269 @@
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report
+from imblearn.over_sampling import SMOTE
+from sklearn.preprocessing import LabelEncoder
+
+
+# In this dataset, 'Class' is the target: 0 = normal transaction, 1 = fraudulent
+df = pd.read_csv('CW_adversarial_examples_2percent.csv')
+
+
+print(df.columns)
+
+df.head()
+
+# Check data types and identify categorical columns
+categorical_columns = df.select_dtypes(include=['object']).columns
+print("Categorical columns:", list(categorical_columns))
+
+# Create a label encoder object
+label_encoder = LabelEncoder()
+
+# Make a copy of the dataframe to avoid modifying the original
+df_encoded = df.copy()
+
+# Apply label encoding to each categorical column except the label column
+for column in [col for col in categorical_columns if col != 'label']:
+    df_encoded[column] = label_encoder.fit_transform(df[column])
+
+    # Create a mapping dictionary for reference (optional)
+    mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
+    print(f"Mapping for {column}:", mapping)
+
+# Special handling for the label column - normal=0, any attack=1
+if 'label' in df.columns:
+    df_encoded['label'] = df['label'].apply(lambda x: 0 if x == 'normal.' else 1)
+    print("Label encoding: 'normal' -> 0, all other attacks -> 1")
+
+df_encoded.head(100)
+
+# Save the encoded dataframe to a new CSV file
+df_encoded.to_csv('CW_kddcup99_encoded.csv', index=False)
+
+# Check class imbalance
+print("Class distribution before SMOTE:")
+print(df_encoded['label'].value_counts())
+# Might show something like: 0: 284,315 (normal transactions), 1: 492 (fraudulent)
+
+# Prepare features and target
+X = df_encoded.drop('label', axis=1)
+y = df_encoded['label']
+
+# Split the data
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+# Train a model without SMOTE
+model_no_smote = RandomForestClassifier(random_state=42)
+model_no_smote.fit(X_train, y_train)
+y_pred_no_smote = model_no_smote.predict(X_test)
+
+print("Model performance WITHOUT SMOTE:")
+print(classification_report(y_test, y_pred_no_smote))
+# Likely shows high overall accuracy but poor recall on class 1 (frauds)
+
+# Apply SMOTE to balance the training data
+smote = SMOTE(random_state=42)
+X_train_smote, y_train_smote = smote.fit_resample(X_train, y_train)
+
+# Check new class distribution
+print("Class distribution after SMOTE:")
+print(pd.Series(y_train_smote).value_counts())
+# Should show balanced classes
+
+# Train a new model with SMOTE-enhanced data
+model_smote = RandomForestClassifier(random_state=42)
+model_smote.fit(X_train_smote, y_train_smote)
+y_pred_smote = model_smote.predict(X_test)
+
+print("Model performance WITH SMOTE:")
+print(classification_report(y_test, y_pred_smote))
+
+# Save the balanced data to a CSV file
+# First, convert X_train_smote to DataFrame with original column names
+balanced_df = pd.DataFrame(X_train_smote, columns=X.columns)
+
+# Then add the target column
+balanced_df['label'] = y_train_smote
+
+# Save to CSV
+output_file = 'CW_balanced_data.csv'
+balanced_df.to_csv(output_file, index=False)
+print(f"\nBalanced data saved to '{output_file}'")
+
+# Optionally, save the test data for later use
+test_df = pd.DataFrame(X_test, columns=X.columns)
+test_df['label'] = y_test
+test_df.to_csv('CW_test_data.csv', index=False)
+print(f"Test data saved to 'CW_test_data.csv'")
+
+# Print examples of synthetic data
+print("\nExamples of original minority class samples:")
+original_minority = df[df['label'] == 1].head(2)
+print(original_minority)
+
+print("\nExamples of synthetic minority class samples after SMOTE:")
+synthetic_minority = balanced_df[balanced_df['label'] == 1].iloc[-2:]
+print(synthetic_minority)
+
+balanced_df.head()
+
+import pandas as pd
+import numpy as np
+
+# Use balanced_df as the dataframe for standardization
+
+# Identify numerical columns (excluding the label column)
+numerical_columns = balanced_df.select_dtypes(include=['int64', 'float64']).columns
+numerical_columns = [col for col in numerical_columns if col != 'label']
+
+# Create a copy of the dataframe to avoid modifying the original
+df_standardized = balanced_df.copy()
+
+# Apply standardization formula for each numerical column
+for column in numerical_columns:
+    # Calculate mean and standard deviation
+    mean_value = balanced_df[column].mean()
+    std_value = balanced_df[column].std()
+
+    # Check for zero standard deviation to avoid division by zero
+    if std_value == 0:
+        print(f"Warning: Column {column} has zero standard deviation. Skipping standardization.")
+        continue
+
+    # Apply the standardization formula: (x - mean(x)) / std(x)
+    df_standardized[column] = (balanced_df[column] - mean_value) / std_value
+
+    # Print statistics for verification
+    print(f"Column: {column}")
+    print(f"  Original - Mean: {mean_value:.4f}, Std: {std_value:.4f}")
+    print(f"  Standardized - Mean: {df_standardized[column].mean():.4f}, Std: {df_standardized[column].std():.4f}")
+    print("---")
+
+# Verify overall standardization
+print("\nOverall verification:")
+print("Mean values after standardization:")
+print(df_standardized[numerical_columns].mean())
+print("\nStandard deviation values after standardization:")
+print(df_standardized[numerical_columns].std())
+
+# Save the standardized dataframe if needed
+df_standardized.to_csv('CW_kddcup99_standardized.csv', index=False)
+
+print("\nStandardization complete. Data saved to 'CW_kddcup99_standardized.csv'")
+
+df_standardized.head()
+
+import pandas as pd
+import numpy as np
+
+# Load the standardized dataframe
+# Assuming the file exists after your previous code ran
+df_standardized = pd.read_csv('CW_kddcup99_standardized.csv')
+
+# Method 1: Reduce precision of float columns
+# This significantly reduces file size by limiting decimal places
+for column in df_standardized.select_dtypes(include=['float64']).columns:
+    df_standardized[column] = df_standardized[column].round(4)  # Reduce to 4 decimal places
+
+# Method 2: Convert float64 to float32 (halves the memory usage for floating point columns)
+for column in df_standardized.select_dtypes(include=['float64']).columns:
+    df_standardized[column] = df_standardized[column].astype('float32')
+
+# Method 3: Convert int64 to smaller integer types where possible
+for column in df_standardized.select_dtypes(include=['int64']).columns:
+    # Find the min/max values to determine the smallest possible integer type
+    col_min = df_standardized[column].min()
+    col_max = df_standardized[column].max()
+
+    # Choose appropriate type based on value range
+    if col_min >= 0:  # Unsigned integers for non-negative values
+        if col_max <= 255:
+            df_standardized[column] = df_standardized[column].astype('uint8')
+        elif col_max <= 65535:
+            df_standardized[column] = df_standardized[column].astype('uint16')
+        elif col_max <= 4294967295:
+            df_standardized[column] = df_standardized[column].astype('uint32')
+    else:  # Signed integers for values that can be negative
+        if col_min >= -128 and col_max <= 127:
+            df_standardized[column] = df_standardized[column].astype('int8')
+        elif col_min >= -32768 and col_max <= 32767:
+            df_standardized[column] = df_standardized[column].astype('int16')
+        elif col_min >= -2147483648 and col_max <= 2147483647:
+            df_standardized[column] = df_standardized[column].astype('int32')
+
+# Method 4: If you don't need all rows, you can sample the dataset
+# Uncomment and adjust the fraction as needed
+# df_standardized = df_standardized.sample(frac=0.5, random_state=42)  # Keep 50% of rows
+
+# Method 5: If you don't need all columns, you can drop some
+# Uncomment and specify columns to drop if appropriate
+# columns_to_drop = ['column1', 'column2']  # Replace with actual column names
+# df_standardized = df_standardized.drop(columns=columns_to_drop)
+
+# Method 6: Compress the CSV using gzip when saving
+# This creates a smaller file but requires unzipping before use
+df_standardized.to_csv('CW_kddcup99_standardized_small.csv', index=False)
+df_standardized.to_csv('CW_kddcup99_standardized_small.csv.gz', index=False, compression='gzip')
+
+# Print information about the memory usage before and after optimization
+print(f"Memory usage: {df_standardized.memory_usage().sum() / 1024**2:.2f} MB")
+print(f"Original file size might have been approximately {len(df_standardized) * len(df_standardized.columns) * 8 / 1024**2:.2f} MB (estimated)")
+print("File saved as 'CW_kddcup99_standardized_small.csv' and compressed version 'kddcup99_standardized_small.csv.gz'")
+
+import pandas as pd
+import numpy as np
+
+# Use balanced_df as the dataframe for min-max scaling
+
+# Identify numerical columns (excluding the label column)
+numerical_columns = balanced_df.select_dtypes(include=['int64', 'float64']).columns
+numerical_columns = [col for col in numerical_columns if col != 'label']
+
+# Create a copy of the dataframe to avoid modifying the original
+df_minmax = balanced_df.copy()
+
+# Apply min-max scaling formula for each numerical column
+for column in numerical_columns:
+    # Calculate min and max
+    min_value = balanced_df[column].min()
+    max_value = balanced_df[column].max()
+
+    # Check for division by zero (when min equals max)
+    if max_value == min_value:
+        print(f"Warning: Column {column} has constant values. Setting to 0.")
+        df_minmax[column] = 0
+        continue
+
+    # Apply the min-max scaling formula: (x - min) / (max - min)
+    df_minmax[column] = (balanced_df[column] - min_value) / (max_value - min_value)
+
+    # Print statistics for verification
+    print(f"Column: {column}")
+    print(f"  Original - Min: {min_value:.4f}, Max: {max_value:.4f}")
+    print(f"  Min-Max Scaled - Min: {df_minmax[column].min():.4f}, Max: {df_minmax[column].max():.4f}")
+    print("---")
+
+# Verify overall min-max scaling
+print("\nOverall verification:")
+print("Min values after min-max scaling:")
+print(df_minmax[numerical_columns].min())
+print("\nMax values after min-max scaling:")
+print(df_minmax[numerical_columns].max())
+
+# Round to 4 decimal places to reduce file size
+for column in numerical_columns:
+    df_minmax[column] = df_minmax[column].round(4)
+
+# Convert to float32 to further reduce size
+for column in numerical_columns:
+    df_minmax[column] = df_minmax[column].astype('float32')
+
+# Save the min-max scaled dataframe
+df_minmax.to_csv('CW_2percent_kddcup99_minmax.csv', index=False)
+# Save compressed version for even smaller file size
+df_minmax.to_csv('CW_2percent_kddcup99_minmax.csv.gz', compression='gzip', index=False)
+
+print("\nMin-Max scaling complete. Data saved to 'CW_2percent_kddcup99_minmax.csv' and 'CW_2percent_kddcup99_minmax.csv.gz'")
