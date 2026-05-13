@@ -1,0 +1,19 @@
+import pandas as pd
+
+# Load your CSV file
+df = pd.read_csv('KDDCup99.csv')
+
+print("Original dataset shape:", df.shape)
+print("Missing values per column:")
+print(df.isnull().sum())
+
+# Remove rows with NaN values
+df_cleaned = df.dropna()
+
+print(f"\nRows before: {len(df)}")
+print(f"Rows after: {len(df_cleaned)}")
+print(f"Rows removed: {len(df) - len(df_cleaned)}")
+
+# Save cleaned dataset
+df_cleaned.to_csv('cleaned_dataset.csv', index=False)
+print("Cleaned dataset saved as 'cleaned_dataset.csv'")

@@ -1,0 +1,21 @@
+import pandas as pd
+
+# Load files
+selected_features_df = pd.read_csv('unsw_selected_features.csv', header=None)
+unsw_df = pd.read_csv('unsw_nb15_minmax.csv')
+
+# Get selected feature names (all values from first column including header)
+selected_features = selected_features_df.iloc[:, 0].dropna().tolist()
+
+# Add Label column to selected features
+columns_to_keep = selected_features + ['Label']
+
+# Create new dataset with selected columns
+new_df = unsw_df[columns_to_keep]
+
+# Save new dataset
+new_df.to_csv('unsw_selected_features.csv', index=False)
+
+print(f"Original shape: {unsw_df.shape}")
+print(f"New shape: {new_df.shape}")
+print("File saved as 'unsw_selected_features.csv'")
