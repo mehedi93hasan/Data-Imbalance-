@@ -294,15 +294,16 @@ Repeat for `--dataset unswnb15`, `--dataset cicids2017`, and `--attack cw`.
 If FEDMS contributes to your research, please cite:
 
 ```bibtex
-@article{hasan2025fedms,
-  title   = {Ensemble-Based Adversarial Defense with Dynamic Model Selection
-             for Intrusion Detection Systems},
-  author  = {Hasan, Md Mehedi and Islam, Rafiqul and Mamun, Quazi
-             and Islam, Md Zahidul and Gao, Junbin},
-  journal = {[Journal Name]},
-  year    = {2025},
-  doi     = {10.xxxx/xxxxxx},
-  note    = {Code: \url{https://github.com/mehedi93hasan/FEDMS}}
+@article{HASAN2026101970,
+title = {Ensemble-based adversarial defense with dynamic model selection for intrusion detection systems},
+journal = {Internet of Things},
+volume = {38},
+pages = {101970},
+year = {2026},
+issn = {2542-6605},
+doi = {https://doi.org/10.1016/j.iot.2026.101970},
+url = {https://www.sciencedirect.com/science/article/pii/S2542660526001009},
+author = {Md Mehedi Hasan and Rafiqul Islam and Quazi Mamun and Md Zahidul Islam and Junbin Gao},
 }
 ```
 
