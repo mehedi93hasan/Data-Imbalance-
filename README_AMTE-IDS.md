@@ -282,15 +282,13 @@ Repeat for `--dataset unswnb15` and `--dataset cicids2017`.
 If AMTE-IDS contributes to your research, please cite:
 
 ```bibtex
-@article{hasan2025amteid,
-  title   = {Adaptive Multi-View Transformer Ensemble for Intrusion Detection:
-             Addressing Data Imbalance and Enhancing Attack Classification},
-  author  = {Hasan, Md Mehedi and Islam, Rafiqul and Mamun, Quazi
-             and Islam, Md Zahidul and Gao, Junbin},
-  journal = {[Journal Name]},
-  year    = {2025},
-  doi     = {10.xxxx/xxxxxx},
-  note    = {Code: \url{https://github.com/mehedi93hasan/AMTE-IDS}}
+@article{hasan2026adaptive,
+  title={Adaptive multi-view transformer ensemble for intrusion detection: Addressing data imbalance and enhancing attack classification},
+  author={Hasan, Md Mehedi and Islam, Rafiqul and Mamun, Quazi and Islam, Md Zahidul and Gao, Junbin},
+  journal={Internet of Things},
+  pages={101923},
+  year={2026},
+  publisher={Elsevier}
 }
 ```
 
